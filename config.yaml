@@ -1,0 +1,53 @@
+# Configuracion del procesador Python (Cap. II II.3.3 — RNF-04)
+# Todos los parametros son sobreescribibles por variables de entorno del mismo nombre
+# en MAYUSCULAS con prefijo PROCESSOR_ (via pydantic-settings).
+#
+# Ejemplo: LOKI__URL=http://loki:3100 sobreescribe loki.url
+#
+# En docker-compose, este archivo se monta como ConfigMap.
+# En local, se carga directamente desde la raiz del proyecto.
+
+loki:
+  url: "http://localhost:13100"todo:apuntando al tunel ssh # LOKI_URL en env
+  query_step: "60s"               # paso de la query en LogQL
+  max_lines: 10000                # limite de lineas por ciclo
+  timeout_seconds: 30             # timeout de conexion
+
+alertmanager:
+  url: "http://alertmanager:9093"  # ALERTMANAGER_URL en env
+  webhook_path: "/api/v2/alerts"
+  timeout_seconds: 10
+
+processor:
+  schedule_interval_minutes: 5   # W = ventana de analisis temporal
+  history_days: 7                # H = dias de historico para calcular μ y σ
+  threshold_k: 3.0               # k = coeficiente de desviaciones estandar (regla 3σ)
+  min_observations: 10           # minimo de observaciones historicas para calcular umbral
+  services:                      # servicios a monitorear (labels service= en Loki)
+    - tecoposv1
+    - tecoposv2
+    - gateway
+    - midas-dev
+    - control
+    - controlbeta
+drain:
+  depth: 4                       # profundidad del arbol de analisis (Cap. I I.2.3)
+  similarity_threshold: 0.4      # umbral de similitud para agrupar mensajes
+  max_children: 100              # maximo de hijos por nodo del arbol
+  extra_delimiters: []           # delimitadores extra ademas de espacios
+  state_save_path: "./drain_state"   # directorio donde se persiste el estado del arbol
+  state_save_interval: 5         # ciclos entre cada guardado del estado a disco
+
+dbscan:
+  eps: 0.5                       # radio de vecindad
+  min_samples: 2                 # puntos minimos para formar cluster
+  metric: "euclidean"            # metrica de distancia
+
+metrics:
+  enabled: true
+  port: 8000                     # Prometheus /metrics endpoint (Dashboard 3)
+  host: "0.0.0.0"
+
+logging:
+  level: "DEBUG" //todo:INFO                 # nivel de log del propio procesador (DEBUG en dev)
+  format: "console"                 # "json" en produccion, "console" para desarrollo local

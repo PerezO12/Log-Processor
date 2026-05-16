@@ -1,0 +1,29 @@
+# Dependencias del procesador Python (Fase 4 - Cap. III)
+# Versiones pinneadas para garantizar reproducibilidad y descarga offline.
+# Si actualizas algo aqui, vuelve a ejecutar `pip download` (ver DESCARGA-OFFLINE.md).
+
+# --- Nucleo de la tesis ---
+drain3==0.9.11                  # algoritmo Drain (Cap. II II.3.3 etapa 1)
+scikit-learn==1.5.2             # DBSCAN para agrupacion (Cap. II II.3.3 etapa 3)
+numpy==1.26.4                   # base numerica (sklearn lo requiere)
+pandas==2.2.3                   # estructuras tabulares para el pipeline
+scipy==1.13.1                   # dependencia transitiva de sklearn
+
+# --- Cliente Loki + AlertManager ---
+httpx==0.27.2                   # cliente HTTP async para LogQL y webhooks
+tenacity==9.0.0                 # reintentos con backoff (II.4.1 capa 3)
+
+# --- Configuracion y validacion ---
+pydantic==2.9.2                 # validacion del config.yaml
+pydantic-settings==2.6.1        # carga config desde env + YAML
+pyyaml==6.0.2                   # parseo YAML
+
+# --- Scheduler periodico ---
+apscheduler==3.10.4             # corre el ciclo cada W minutos
+
+# --- Logging y observabilidad del propio procesador ---
+structlog==24.4.0               # logs JSON para el procesador mismo
+prometheus-client==0.21.0       # endpoint /metrics (alimentara Dashboard 3)
+
+# --- Utilidades dev ---
+ipython==8.28.0                 # REPL comodo para experimentacion

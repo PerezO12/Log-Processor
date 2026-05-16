@@ -1,0 +1,16 @@
+# Excluir del contexto de build cosas que no aportan al contenedor.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env
+.git/
+.gitignore
+*.md
+DESCARGA-OFFLINE.md
+README.md

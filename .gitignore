@@ -1,0 +1,24 @@
+# Wheels descargados (los descargas tu, no los versionas)
+wheels/*
+!wheels/.gitkeep
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Bytecode Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Estado del cache Drain (se genera en runtime)
+drain_state/
+*.bin
+
+# Variables de entorno
+.env
+.env.local
