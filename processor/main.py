@@ -50,6 +50,7 @@ from processor.metrics import (
 )
 from processor.pre_parser import PreParser
 from processor.settings import Settings, load_settings
+from processor.telegram_publisher import TelegramPublisher
 from processor.threshold import Anomaly, TemplateFrequency, detect_anomalies
 
 
@@ -99,6 +100,7 @@ class Processor:
         self._pre_parser = PreParser(settings)
         self._clusterer = DBSCANClusterer(settings)
         self._publisher = AlertPublisher(settings, dry_run=dry_run)
+        self._telegram = TelegramPublisher(settings, dry_run=dry_run)
 
         # Resolver cacheado: nombre_servicio -> (k, min_obs).
         self._thresholds: Dict[str, Tuple[float, int]] = {
@@ -153,6 +155,7 @@ class Processor:
                 anomalies = self._detect_anomalies_across_services(current_freqs)
                 clustered = self._clusterer.cluster(anomalies)
                 self._publisher.publish(clustered)
+                self._telegram.publish(clustered)
                 self._update_anomaly_metrics(clustered)
                 self._persist_window(window_end, current_freqs)
                 self._prune_history()

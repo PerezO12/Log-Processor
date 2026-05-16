@@ -8,6 +8,11 @@
 #
 # En docker-compose este archivo se monta como ConfigMap.
 # En local se carga desde la raiz del proyecto.
+#
+# === PERFIL DE TEST/DESARROLLO ACTIVO ===
+# Los valores actuales (W=1, H=1, min_observations=3, k=2.0) estan ajustados
+# para iteracion rapida: empieza a detectar anomalias en 3-5 min.
+# Para produccion, restaurar los valores comentados al lado de cada parametro.
 
 # ----------------------------------------------------------------------------
 # Fuente de datos
@@ -27,20 +32,33 @@ alertmanager:
   timeout_seconds: 10
 
 # ----------------------------------------------------------------------------
+# Notificaciones via Telegram (canal opcional, paralelo a AlertManager)
+# El token y chat_id se exportan como env vars (NO commitear en este archivo):
+#   PROCESSOR_TELEGRAM__ENABLED=true
+#   PROCESSOR_TELEGRAM__BOT_TOKEN=<token de BotFather>
+#   PROCESSOR_TELEGRAM__CHAT_ID=<id del chat>
+# ----------------------------------------------------------------------------
+telegram:
+  enabled: false                  # default off; activar via env
+  bot_token: ""                   # exportar PROCESSOR_TELEGRAM__BOT_TOKEN
+  chat_id: ""                     # exportar PROCESSOR_TELEGRAM__CHAT_ID
+  timeout_seconds: 10
+  min_severity: "warning"         # "warning" envia todas; "critical" solo |z|>=5
+
+# ----------------------------------------------------------------------------
 # Logica del procesador
 # ----------------------------------------------------------------------------
 processor:
-  schedule_interval_minutes: 5    # W: ventana de analisis temporal
-  history_days: 7                 # H: dias de historico para mu y sigma
+  schedule_interval_minutes: 1    # W: TEST (prod = 5)
+  history_days: 1                 # H: TEST (prod = 7)
 
   # Valores por defecto aplicados a todos los servicios.
   # Pueden sobreescribirse por servicio en `services[].overrides`.
   defaults:
-    threshold_k: 3.0              # k: coeficiente de desviaciones estandar
-    min_observations: 10          # ventanas historicas minimas para calcular umbral
+    threshold_k: 2.0              # k: TEST sensible (prod = 3.0)
+    min_observations: 3           # TEST (prod = 10) — empieza a detectar tras 3 ciclos
 
   # Servicios a monitorear. Cada uno apunta a un perfil de `profiles:`.
-  # Agregar un servicio nuevo = agregar una entrada aqui (sin tocar codigo).
   services:
     - name: tecoposv1
       profile: winston_json
@@ -49,12 +67,11 @@ processor:
     - name: gateway
       profile: nestjs
       overrides:
-        threshold_k: 2.5          # servicio en prod, mas trafico => k mas estricto
+        threshold_k: 1.8          # mas trafico, k mas estricto
     - name: midas-dev
       profile: nestjs
       overrides:
-        threshold_k: 4.0          # entorno dev, mas ruidoso
-        min_observations: 5
+        threshold_k: 2.5          # mas ruidoso, k mas laxo
     - name: control
       profile: kafkajs_json
     - name: controlbeta
@@ -62,8 +79,6 @@ processor:
 
 # ----------------------------------------------------------------------------
 # Perfiles de parsing (Strategy pattern).
-# Cada perfil es una clase Python registrada en processor/profiles/registry.py
-# Los parametros (regex, level_map, level_field, message_field) viven aqui.
 # ----------------------------------------------------------------------------
 profiles:
   nestjs:
@@ -109,7 +124,6 @@ dbscan:
 
 # ----------------------------------------------------------------------------
 # Persistencia del historico mu/sigma entre reinicios.
-# SQLite embebido en stdlib: atomico, sin dependencias extra.
 # ----------------------------------------------------------------------------
 history:
   backend: sqlite                 # sqlite | memory
@@ -129,5 +143,5 @@ metrics:
 # Logging del propio procesador
 # ----------------------------------------------------------------------------
 logging:
-  level: "INFO"                   # DEBUG en desarrollo
+  level: "INFO"                   # DEBUG en desarrollo, INFO en test/prod
   format: "console"               # json | console

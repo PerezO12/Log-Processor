@@ -45,6 +45,26 @@ class AlertManagerConfig(BaseModel):
     timeout_seconds: int = 10
 
 
+class TelegramConfig(BaseModel):
+    """Notificaciones push via Telegram Bot API.
+
+    Para activar:
+        1. Crear bot en @BotFather, copiar el token.
+        2. Iniciar conversacion con el bot (/start).
+        3. Obtener chat_id visitando
+           https://api.telegram.org/bot<TOKEN>/getUpdates
+        4. Exportar:
+           PROCESSOR_TELEGRAM__ENABLED=true
+           PROCESSOR_TELEGRAM__BOT_TOKEN=<token>
+           PROCESSOR_TELEGRAM__CHAT_ID=<chat_id>
+    """
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+    timeout_seconds: int = 10
+    min_severity: Literal["warning", "critical"] = "warning"
+
+
 class ProcessorDefaults(BaseModel):
     threshold_k: float = 3.0
     min_observations: int = 10
@@ -163,6 +183,7 @@ class Settings(BaseSettings):
 
     loki: LokiConfig = Field(default_factory=LokiConfig)
     alertmanager: AlertManagerConfig = Field(default_factory=AlertManagerConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     processor: ProcessorConfig = Field(default_factory=ProcessorConfig)
     profiles: Dict[str, ProfileSpec] = Field(default_factory=dict)
     drain: DrainConfig = Field(default_factory=DrainConfig)

@@ -80,10 +80,12 @@ def detect_anomalies(
         mean = statistics.mean(samples)
         stddev = statistics.stdev(samples) if len(samples) > 1 else 0.0
         if stddev == 0.0:
-            # Frecuencia historicamente constante: si el actual cambia, lo
-            # reportamos solo si la diferencia absoluta es relevante.
+            # Frecuencia historicamente constante: cualquier cambio es
+            # "infinitamente" anomalo. Usamos un finito grande (no float inf)
+            # para mantener numericamente estable a DBSCAN aguas abajo.
             if tf.count != mean:
-                anomalies.append(_build(tf, mean, 0.0, float("inf"), tf.count > mean))
+                z_sentinel = 1000.0 if tf.count > mean else -1000.0
+                anomalies.append(_build(tf, mean, 0.0, z_sentinel, tf.count > mean))
             continue
         z = (tf.count - mean) / stddev
         if z > k:

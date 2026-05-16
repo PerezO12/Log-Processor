@@ -14,6 +14,7 @@ Implementación del Cap. III de la tesis. Diseñado para ser **genérico, escala
 - [Configuración](#configuración)
 - [Cómo probarlo](#cómo-probarlo)
 - [Métricas Prometheus](#métricas-prometheus)
+- [Notificaciones por Telegram](#notificaciones-por-telegram)
 - [Decisiones de diseño](#decisiones-de-diseño)
 - [Despliegue en Docker / Kubernetes](#despliegue-en-docker--kubernetes)
 - [Troubleshooting](#troubleshooting)
@@ -332,6 +333,91 @@ Todas en `http://localhost:8000/metrics`:
 | `service_threshold_k` | Gauge | `service` | k efectivo por servicio (visualiza overrides) |
 | `processor_cycle_duration_seconds` | Histogram | — | Duración de cada ciclo |
 | `processor_errors_total` | Counter | `module`, `service` | Errores por módulo y servicio |
+
+---
+
+## Notificaciones por Telegram
+
+Canal opcional paralelo a AlertManager. **Un solo mensaje por ciclo** (no spamea), con todas las anomalías agrupadas. Falla silenciosa si Telegram no responde.
+
+### Setup (5 minutos)
+
+**1. Crear bot.** En Telegram, abre [@BotFather](https://t.me/BotFather):
+```
+/newbot
+<nombre del bot, ej: tecopos-anomaly-bot>
+<username, debe terminar en _bot>
+```
+BotFather te devuelve un token tipo `123456789:ABCdefGhIJklmNoPQrsTUvwxYZ`.
+
+**2. Obtener `chat_id`.** Abre conversación con tu bot (búscalo por username), envía `/start`. Luego visita en el navegador:
+```
+https://api.telegram.org/bot<TU_TOKEN>/getUpdates
+```
+Busca `"chat":{"id":<chat_id>,...}` en la respuesta. Es un número entero (positivo para chats privados, negativo para grupos).
+
+**3. Exportar env vars.**
+
+Linux/macOS:
+```bash
+export PROCESSOR_TELEGRAM__ENABLED=true
+export PROCESSOR_TELEGRAM__BOT_TOKEN="123456789:ABC..."
+export PROCESSOR_TELEGRAM__CHAT_ID="123456789"
+```
+
+Windows PowerShell:
+```powershell
+$env:PROCESSOR_TELEGRAM__ENABLED="true"
+$env:PROCESSOR_TELEGRAM__BOT_TOKEN="123456789:ABC..."
+$env:PROCESSOR_TELEGRAM__CHAT_ID="123456789"
+```
+
+**4. Arrancar el procesador** — cuando detecte anomalías recibirás un mensaje por chat.
+
+### Configuración avanzada
+
+En `config.yaml`:
+
+```yaml
+telegram:
+  enabled: false                  # global on/off
+  timeout_seconds: 10
+  min_severity: "warning"         # "warning" (todas) o "critical" (|z|>=5 solamente)
+```
+
+> El token y chat_id **nunca deben ir en `config.yaml`** — usa env vars para mantenerlos fuera de git.
+
+### Formato del mensaje (HTML)
+
+```
+Anomalias detectadas: 3
+
+[CRIT] gateway (up)
+  plantilla: login failed for <*>
+  frecuencia: 200 (mu=10.0, sigma=2.0, z=95.00)
+  cluster: 0
+
+[CRIT] tecoposv1 (up)
+  plantilla: db connection lost
+  frecuencia: 50 (mu=5.0, sigma=1.0, z=45.00)
+  cluster: 0
+
+[WARN] midas-dev (down)
+  plantilla: silence
+  frecuencia: 0 (mu=100.0, sigma=10.0, z=-10.00)
+  cluster: -1
+```
+
+### Probar la integración antes de producirla
+
+```bash
+export PROCESSOR_TELEGRAM__ENABLED=true
+export PROCESSOR_TELEGRAM__BOT_TOKEN="..."
+export PROCESSOR_TELEGRAM__CHAT_ID="..."
+python -m processor.main --dry-run
+```
+
+En `--dry-run` el publisher imprime el mensaje en stdout (`telegram_dry_run`) **sin enviarlo realmente** — ideal para validar formato y filtro de severidad.
 
 ---
 
