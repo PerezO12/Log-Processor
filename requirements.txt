@@ -27,3 +27,4 @@ prometheus-client==0.21.0       # endpoint /metrics (alimentara Dashboard 3)
 
 # --- Utilidades dev ---
 ipython==8.28.0                 # REPL comodo para experimentacion
+pytest==8.3.3                   # tests unitarios

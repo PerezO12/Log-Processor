@@ -1,53 +1,133 @@
-# Configuracion del procesador Python (Cap. II II.3.3 — RNF-04)
-# Todos los parametros son sobreescribibles por variables de entorno del mismo nombre
-# en MAYUSCULAS con prefijo PROCESSOR_ (via pydantic-settings).
+# Configuracion del procesador de deteccion de anomalias (Cap. III, RNF-04).
 #
-# Ejemplo: LOKI__URL=http://loki:3100 sobreescribe loki.url
+# Todos los parametros son sobreescribibles por variables de entorno con prefijo
+# PROCESSOR_ y separador __ para anidados (via pydantic-settings).
 #
-# En docker-compose, este archivo se monta como ConfigMap.
-# En local, se carga directamente desde la raiz del proyecto.
+#   PROCESSOR_LOKI__URL=http://loki:3100      sobreescribe loki.url
+#   PROCESSOR_PROCESSOR__DEFAULTS__THRESHOLD_K=2.5
+#
+# En docker-compose este archivo se monta como ConfigMap.
+# En local se carga desde la raiz del proyecto.
 
+# ----------------------------------------------------------------------------
+# Fuente de datos
+# ----------------------------------------------------------------------------
 loki:
-  url: "http://localhost:13100"todo:apuntando al tunel ssh # LOKI_URL en env
-  query_step: "60s"               # paso de la query en LogQL
-  max_lines: 10000                # limite de lineas por ciclo
-  timeout_seconds: 30             # timeout de conexion
+  url: "http://localhost:13100"   # SSH tunnel hacia el sandbox Hetzner
+  query_step: "60s"
+  max_lines: 5000                 # limite de Loki sandbox: max_entries_limit_per_query=5000
+  timeout_seconds: 30
 
+# ----------------------------------------------------------------------------
+# Destino de alertas
+# ----------------------------------------------------------------------------
 alertmanager:
-  url: "http://alertmanager:9093"  # ALERTMANAGER_URL en env
+  url: "http://alertmanager:9093"
   webhook_path: "/api/v2/alerts"
   timeout_seconds: 10
 
+# ----------------------------------------------------------------------------
+# Logica del procesador
+# ----------------------------------------------------------------------------
 processor:
-  schedule_interval_minutes: 5   # W = ventana de analisis temporal
-  history_days: 7                # H = dias de historico para calcular μ y σ
-  threshold_k: 3.0               # k = coeficiente de desviaciones estandar (regla 3σ)
-  min_observations: 10           # minimo de observaciones historicas para calcular umbral
-  services:                      # servicios a monitorear (labels service= en Loki)
-    - tecoposv1
-    - tecoposv2
-    - gateway
-    - midas-dev
-    - control
-    - controlbeta
+  schedule_interval_minutes: 5    # W: ventana de analisis temporal
+  history_days: 7                 # H: dias de historico para mu y sigma
+
+  # Valores por defecto aplicados a todos los servicios.
+  # Pueden sobreescribirse por servicio en `services[].overrides`.
+  defaults:
+    threshold_k: 3.0              # k: coeficiente de desviaciones estandar
+    min_observations: 10          # ventanas historicas minimas para calcular umbral
+
+  # Servicios a monitorear. Cada uno apunta a un perfil de `profiles:`.
+  # Agregar un servicio nuevo = agregar una entrada aqui (sin tocar codigo).
+  services:
+    - name: tecoposv1
+      profile: winston_json
+    - name: tecoposv2
+      profile: nestjs
+    - name: gateway
+      profile: nestjs
+      overrides:
+        threshold_k: 2.5          # servicio en prod, mas trafico => k mas estricto
+    - name: midas-dev
+      profile: nestjs
+      overrides:
+        threshold_k: 4.0          # entorno dev, mas ruidoso
+        min_observations: 5
+    - name: control
+      profile: kafkajs_json
+    - name: controlbeta
+      profile: kafkajs_json
+
+# ----------------------------------------------------------------------------
+# Perfiles de parsing (Strategy pattern).
+# Cada perfil es una clase Python registrada en processor/profiles/registry.py
+# Los parametros (regex, level_map, level_field, message_field) viven aqui.
+# ----------------------------------------------------------------------------
+profiles:
+  nestjs:
+    type: regex
+    pattern: '^\[Nest\]\s+\d+.*?\s+(?P<level>LOG|WARN|ERROR|DEBUG|VERBOSE)\s+\[(?P<context>[^\]]+)\]\s+(?P<message>.+)$'
+    level_map:
+      LOG: info
+      WARN: warn
+      ERROR: error
+      DEBUG: debug
+      VERBOSE: debug
+
+  kafkajs_json:
+    type: json
+    level_field: level
+    message_field: message
+    extra_fields: [logger, groupId, broker]
+
+  winston_json:
+    type: json
+    level_field: level
+    message_field: message
+    extra_fields: [label]
+
+# ----------------------------------------------------------------------------
+# Algoritmo Drain (Cap. II II.3.3, etapa 1)
+# ----------------------------------------------------------------------------
 drain:
-  depth: 4                       # profundidad del arbol de analisis (Cap. I I.2.3)
-  similarity_threshold: 0.4      # umbral de similitud para agrupar mensajes
-  max_children: 100              # maximo de hijos por nodo del arbol
-  extra_delimiters: []           # delimitadores extra ademas de espacios
-  state_save_path: "./drain_state"   # directorio donde se persiste el estado del arbol
-  state_save_interval: 5         # ciclos entre cada guardado del estado a disco
+  depth: 4
+  similarity_threshold: 0.4
+  max_children: 100
+  extra_delimiters: []
+  state_save_path: "./drain_state"
+  state_save_interval: 5
 
+# ----------------------------------------------------------------------------
+# DBSCAN para clustering de anomalias (Cap. II II.3.3, etapa 3)
+# ----------------------------------------------------------------------------
 dbscan:
-  eps: 0.5                       # radio de vecindad
-  min_samples: 2                 # puntos minimos para formar cluster
-  metric: "euclidean"            # metrica de distancia
+  eps: 0.5
+  min_samples: 2
+  metric: "euclidean"
 
+# ----------------------------------------------------------------------------
+# Persistencia del historico mu/sigma entre reinicios.
+# SQLite embebido en stdlib: atomico, sin dependencias extra.
+# ----------------------------------------------------------------------------
+history:
+  backend: sqlite                 # sqlite | memory
+  path: "./drain_state/history.db"
+  flush_every_cycles: 1           # 1 = cada ciclo (safest), >1 batchea
+  schema_version: 1
+
+# ----------------------------------------------------------------------------
+# Endpoint Prometheus /metrics (Dashboard 3)
+# ----------------------------------------------------------------------------
 metrics:
   enabled: true
-  port: 8000                     # Prometheus /metrics endpoint (Dashboard 3)
+  port: 8000
   host: "0.0.0.0"
 
+# ----------------------------------------------------------------------------
+# Logging del propio procesador
+# ----------------------------------------------------------------------------
 logging:
-  level: "DEBUG" //todo:INFO                 # nivel de log del propio procesador (DEBUG en dev)
-  format: "console"                 # "json" en produccion, "console" para desarrollo local
+  level: "INFO"                   # DEBUG en desarrollo
+  format: "console"               # json | console
