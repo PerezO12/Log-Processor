@@ -162,6 +162,9 @@ class Settings(BaseSettings):
         env_prefix="PROCESSOR_",
         env_nested_delimiter="__",
         case_sensitive=False,
+        env_file=".env",                # carga .env si existe (gitignored)
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     @classmethod
