@@ -1,526 +1,525 @@
-# Procesador de detección de anomalías en logs
+# Procesador de anomalías en logs
 
-Procesador Python que consume logs desde **Loki** vía LogQL, extrae plantillas con el algoritmo **Drain**, calcula **umbrales dinámicos μ ± kσ** sobre un histórico configurable, agrupa anomalías co-ocurrentes con **DBSCAN**, y publica alertas a **AlertManager**. Expone métricas en `/metrics` (Prometheus).
-
-Implementación del Cap. III de la tesis. Diseñado para ser **genérico, escalable, configurable y profesional**: agregar un servicio nuevo o un formato de log distinto se hace por configuración, sin tocar código.
+> Un sistema que aprende qué es "normal" en tu infraestructura y te avisa cuando algo se rompe — sin que tengas que configurar una regla por cada tipo de error posible.
 
 ---
 
-## Tabla de contenidos
+## La idea en una frase
 
-- [Arquitectura](#arquitectura)
-- [Estructura del proyecto](#estructura-del-proyecto)
-- [Cómo levantar el proyecto](#cómo-levantar-el-proyecto)
-- [Configuración](#configuración)
-- [Cómo probarlo](#cómo-probarlo)
-- [Métricas Prometheus](#métricas-prometheus)
-- [Notificaciones por Telegram](#notificaciones-por-telegram)
-- [Decisiones de diseño](#decisiones-de-diseño)
-- [Despliegue en Docker / Kubernetes](#despliegue-en-docker--kubernetes)
-- [Troubleshooting](#troubleshooting)
+**Imagina un vigilante que lee todos los logs de tus servicios, aprende sus patrones normales y te manda un mensaje de Telegram cuando algo se comporta de manera inusual.**
+
+No necesitas decirle qué buscar. Él lo aprende solo.
 
 ---
 
-## Arquitectura
+## El problema que resuelve
+
+Si tienes microservicios en producción, generás millones de líneas de log por día. Algo así:
 
 ```
-   ┌──────────────────────────────────────────────┐
-   │  Loki  (http://localhost:13100 vía SSH)      │
-   └──────────────────┬───────────────────────────┘
-                      │ LogQL cada W minutos
-                      ▼
-        ┌──────────────────────────────────┐
-        │     loki_client.py               │
-        └──────────────────┬───────────────┘
-                           ▼
-        ┌──────────────────────────────────┐
-        │     pre_parser.py  (router)      │  ──► profiles/  (Strategy)
-        │                                  │      ├─ regex.py  (NestJS, ...)
-        │                                  │      ├─ json_path.py (kafkajs, Winston, ...)
-        │                                  │      └─ fallback.py
-        └──────────────────┬───────────────┘
-                           ▼
-        ┌──────────────────────────────────┐
-        │     drain_parser.py              │  ──► drain3 (1 miner por servicio,
-        │                                  │      persistencia en drain_state/<svc>.bin)
-        └──────────────────┬───────────────┘
-                           ▼
-        ┌──────────────────────────────────┐
-        │     threshold.py                 │  ──► history.py (SQLite WAL)
-        │     f(t) ⋛ μ ± k·σ por servicio  │
-        └──────────────────┬───────────────┘
-                           ▼
-        ┌──────────────────────────────────┐
-        │     dbscan_cluster.py            │
-        │     agrupa anomalías             │
-        └──────────────────┬───────────────┘
-                           ▼
-        ┌──────────────────────────────────┐
-        │     alert_publisher.py           │  ──►  AlertManager (POST v2)
-        │                                  │       ó stdout estructurado (fallback)
-        └──────────────────────────────────┘
+[gateway]     User garcia authenticated successfully
+[gateway]     GraphQL query executed: getDashboard (342ms)
+[midas-dev]   Payment processed: order #8821, amount 150.00 CUP
+[tecoposv2]   Webhook received from tropipay
+[gateway]     User perez authenticated successfully
+[control]     Kafka consumer group synced
+...
+```
 
-         ┌─────────────────────────────────┐
-         │  metrics.py  →  :8000/metrics   │  (Prometheus)
-         └─────────────────────────────────┘
+¿Cómo sabes cuándo algo está mal? Hoy en día, tienes dos opciones:
+
+1. **Mirar Grafana manualmente** — imposible 24/7
+2. **Configurar alertas explícitas** — tienes que adivinar de antemano cada tipo de error posible
+
+El problema es que los errores más graves son exactamente los que no anticipaste.
+
+Este procesador resuelve eso. Aprende solo que `gateway` normalmente procesa unas 80 queries por minuto. Si de pronto procesa 4, algo pasó. Si procesa 800, algo también pasó. Y te avisa.
+
+---
+
+## Qué hace, paso a paso
+
+Cada ciertos minutos (configurable: 1 min en desarrollo, 5 en producción), el procesador:
+
+```
+1. Lee los logs recientes de cada servicio desde Loki
+       ↓
+2. Los entiende: "este es un error de NestJS", "este es un log JSON de Kafka"
+       ↓
+3. Agrupa mensajes similares en categorías (plantillas)
+       ↓
+4. Compara: ¿cuántas veces apareció esta categoría hoy vs. el histórico?
+       ↓
+5. Si hay una desviación estadística significativa → anomalía detectada
+       ↓
+6. Agrupa las anomalías relacionadas (¿varios servicios fallando juntos?)
+       ↓
+7. Manda una notificación a Telegram con el resumen
+```
+
+### Un ejemplo concreto
+
+El servicio `gateway` normalmente registra unas 3 queries lentas de GraphQL por minuto. Un martes a las 11pm:
+
+```
+[gateway] Slow GraphQL query: took 4823ms - getDashboard
+[gateway] Slow GraphQL query: took 3901ms - getDashboard
+[gateway] Slow GraphQL query: took 5122ms - getDashboard
+[gateway] Slow GraphQL query: took 4456ms - getDashboard
+[gateway] Slow GraphQL query: took 3788ms - getDashboard    ← 5 en total
+```
+
+El procesador sabe que el promedio es 3 y la desviación estándar es 0.5. Con 5 ocurrencias:
+
+```
+z = (5 - 3) / 0.5 = 4.0  →  muy por encima del umbral  →  ANOMALÍA
+```
+
+Y llega este mensaje al Telegram del equipo:
+
+```
+🚨 1 anomalía detectada · 23:14
+
+🔴 gateway ↑ CRÍTICO
+   Slow GraphQL query: took <*> - getDashboard
+   5 ocurrencias · ~1.7× lo habitual (esperado ~3)
+```
+
+En producción normal, este mensaje significaría "la base de datos se está poniendo lenta, actúa antes de que los usuarios lo noten."
+
+---
+
+## Los componentes explicados
+
+El sistema tiene cuatro piezas de inteligencia. Acá va cada una explicada desde cero.
+
+---
+
+### 🔍 Pieza 1: El pre-parser (entender el formato)
+
+Cada servicio escribe sus logs de manera diferente:
+
+```
+# NestJS (como gateway y tecoposv2):
+[Nest] 46  - 12/05/2025, 8:06:34 PM   ERROR [HttpExceptionFilter] Request failed
+
+# JSON de kafkajs (como control):
+{"level":"ERROR","logger":"kafkajs","message":"Broker disconnected","timestamp":"..."}
+
+# JSON de Winston (como tecoposv1):
+{"level":"error","message":"Payment timeout","label":"paymentGateway"}
+```
+
+El pre-parser actúa como un traductor. No importa el formato de entrada — siempre produce la misma estructura de salida:
+
+```python
+{
+  "level": "error",           # normalizado: info / warn / error / debug
+  "message": "Request failed" # el texto limpio que se analiza
+}
+```
+
+Esto es importante porque las etapas siguientes no necesitan saber si el servicio usa NestJS, Kafka o Winston. Solo reciben `{level, message}`.
+
+---
+
+### 🌳 Pieza 2: Drain3 (categorizar mensajes similares)
+
+Este es el corazón del sistema. Su trabajo: agrupar miles de líneas de log distintas en decenas de categorías (llamadas "plantillas").
+
+**¿Por qué es necesario?**
+
+Sin categorización, cada línea es única y no puedes sacar estadísticas:
+```
+Payment timeout after 2341ms
+Payment timeout after 5677ms
+Payment timeout after 891ms
+```
+
+Son tres líneas distintas, pero el mismo problema. Drain las convierte en:
+```
+Payment timeout after <*>ms     ← plantilla, aparece 3 veces
+```
+
+Ahora sí puedes preguntar: ¿cuántas veces apareció "Payment timeout" esta semana?
+
+**¿Cómo lo hace?**
+
+Drain usa un árbol de decisión basado en la estructura de las palabras. Para cada mensaje:
+
+1. Mira cuántas palabras tiene
+2. Compara las primeras palabras con clusters existentes
+3. Si encuentra uno que comparte al menos el 40% de palabras → lo agrega ahí
+4. Si no → crea un cluster nuevo
+
+```
+Mensaje: "Payment timeout after 2341ms"
+         ↓
+¿Existe cluster con "Payment timeout after <?>":  Sí
+         ↓
+Agregar al cluster_id=15
+         ↓
+Actualizar plantilla: "Payment timeout after <*>ms"
+         ↓
+count del cluster_id=15 en este ciclo: 3
+```
+
+Al final del ciclo, en vez de 5000 líneas brutas, tenemos algo como:
+```
+cluster_id=3   "User <*> authenticated successfully"         → 87 veces
+cluster_id=7   "PostgreSQL connection established"           → 12 veces
+cluster_id=15  "Payment timeout after <*>ms"                → 3 veces
+cluster_id=22  "Invalid credentials for user <*>"            → 5 veces
+```
+
+**El estado de Drain se guarda en disco** (`drain_state/<servicio>.bin`). Si reinicias el procesador, no pierde el aprendizaje de plantillas — arranca donde quedó.
+
+---
+
+### 📊 Pieza 3: El detector μ ± kσ (¿es esto normal?)
+
+Para cada plantilla que Drain identifica, el detector pregunta: **¿cuántas veces solía aparecer antes? ¿Y cuántas apareció ahora?**
+
+La historia se guarda en SQLite — una base de datos liviana que vive en `drain_state/history.db`. Para cada `(servicio, plantilla, ventana_de_tiempo)` guarda el conteo.
+
+**El cálculo:**
+
+```
+Historial de "Payment timeout" en los últimos 7 días:
+[2, 1, 3, 2, 2, 1, 2, 3, 1, 2, ...]
+
+media (μ) = 1.9
+desviación estándar (σ) = 0.7
+
+Ciclo actual: 14 ocurrencias
+
+z = (14 - 1.9) / 0.7 = 17.3  →  esto es ANÓMALO
+```
+
+El z-score mide cuántas "desviaciones estándar" se aleja el valor actual de lo normal. Con un umbral `k=3.0` (el de producción): si `z > 3` → anomalía hacia arriba, si `z < -3` → anomalía hacia abajo.
+
+**Casos especiales:**
+
+- Si una plantilla siempre tuvo exactamente el mismo conteo (σ=0) y de pronto cambia, cualquier cambio es anómalo. El sistema lo marca como "NUEVO" en la notificación.
+- Si una plantilla aparece muy poco en el histórico (menos de 10 ventanas), el sistema espera antes de empezar a detectar anomalías. No vale generar alertas con estadísticas de 2 puntos.
+
+**Los filtros anti-ruido** (porque estadística pura genera ruido):
+
+El detector aplica tres filtros adicionales antes de reportar una anomalía:
+
+| Filtro | Qué hace | Ejemplo de lo que elimina |
+|--------|----------|--------------------------|
+| `monitor_levels` | Solo analiza ciertos niveles de log | Ignora "PostgreSQL connection established" (INFO) en servicios configurados solo con warn+error |
+| `min_count` | Ignora plantillas con promedio muy bajo | "AppModule initialized" aparece 1 vez por arranque — no tiene sentido monitorearla |
+| `min_delta` | Ignora cambios absolutos pequeños | "3 webhooks en vez de 2" — statísticamente puede ser anómalo, operacionalmente no importa |
+
+Sin estos filtros, el sistema mandaría 8-10 alertas por ciclo. Con ellos: 1-3 alertas, todas relevantes.
+
+---
+
+### 🔗 Pieza 4: DBSCAN (¿varios servicios fallando juntos?)
+
+Hay dos tipos de incidentes:
+
+- **Aislado**: solo `gateway` tiene un problema
+- **Sistémico**: `gateway` + `tecoposv2` + `midas-dev` fallan a la misma vez
+
+El segundo tipo indica un problema en infraestructura compartida: la base de datos, la red, un servicio del que todos dependen. DBSCAN detecta este patrón.
+
+Toma todas las anomalías de un ciclo y las agrupa según su magnitud y dirección:
+
+```
+gateway    → spike de autenticaciones fallidas   z=8.2, dirección=arriba
+tecoposv2  → spike de timeouts de conexión       z=7.9, dirección=arriba
+midas-dev  → caída en pagos procesados           z=6.1, dirección=abajo
+```
+
+Las dos primeras tienen magnitudes muy similares y la misma dirección → las agrupa como "co-ocurrentes". En el mensaje de Telegram aparecen marcadas con `↳ co-ocurre con otras de este ciclo`.
+
+Si ves ese indicador, la causa probable no está en un servicio individual sino en algo compartido.
+
+---
+
+## La arquitectura completa
+
+```
+┌──────────────────────────────────────────────────────┐
+│                   INFRAESTRUCTURA                     │
+│                                                        │
+│  Kubernetes / Docker                                   │
+│  ├── 6 microservicios (tecoposv1, tecoposv2, ...)     │
+│  │     └── escriben logs a stdout                     │
+│  ├── Grafana Alloy  → recoge los logs                 │
+│  └── Loki           → los almacena y expone via API   │
+└──────────────────────────────────────────────────────┘
+                          │
+                          │ HTTP (LogQL)
+                          ▼
+┌──────────────────────────────────────────────────────┐
+│              PROCESADOR (este proyecto)               │
+│                                                        │
+│  Cada W minutos:                                       │
+│                                                        │
+│  LokiClient ──► PreParser ──► Drain3 ──► Detector     │
+│                                            │          │
+│                                          DBSCAN        │
+│                                            │          │
+│                               ┌───────────┴────────┐  │
+│                               ▼                    ▼  │
+│                           Telegram            AlertManager│
+│                           (push directo)      (webhook)   │
+│                                                        │
+│  SQLite: historial de frecuencias por plantilla        │
+│  Prometheus /metrics: contadores para dashboards       │
+└──────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Estructura del proyecto
+## Los servicios monitoreados
 
-```
-processor/
-├── processor/                       paquete Python
-│   ├── settings.py                  pydantic + cross-validation + resolver
-│   ├── loki_client.py               cliente HTTP a Loki con retry
-│   ├── pre_parser.py                router servicio → perfil (O(1))
-│   ├── profiles/                    Strategy pattern
-│   │   ├── base.py                  Protocol + ParsedLog
-│   │   ├── registry.py              PROFILE_REGISTRY + @register
-│   │   ├── regex.py                 RegexProfile (NestJS, etc.)
-│   │   ├── json_path.py             JsonProfile (kafkajs, Winston, etc.)
-│   │   └── fallback.py              FallbackProfile
-│   ├── drain_parser.py              drain3 wrapper, 1 miner/servicio
-│   ├── threshold.py                 detect_anomalies (función pura, resolver inyectado)
-│   ├── dbscan_cluster.py            DBSCANClusterer
-│   ├── history.py                   SQLite WAL para μ/σ persistente
-│   ├── alert_publisher.py           AlertManager v2 + dry-run + stdout fallback
-│   ├── metrics.py                   Prometheus gauges/counters/histograms
-│   └── main.py                      orquestador + scheduler + CLI
-├── tests/                           pytest (27 tests)
-│   ├── test_settings_validation.py
-│   ├── test_profiles.py
-│   ├── test_threshold.py
-│   └── test_history.py
-├── drain_state/                     (runtime) drain miners + history.db
-├── wheels/                          (offline) wheels pre-descargados
-├── config.yaml                      configuración del procesador
-├── requirements.txt                 dependencias pinneadas
-├── Dockerfile                       build online u offline
-├── LICENSE
-└── README.md
-```
+El sistema monitorea 6 microservicios de TECOPOS, cada uno con su formato de log:
+
+| Servicio | Tecnología | Formato de log | Particularidad |
+|----------|-----------|----------------|----------------|
+| `tecoposv1` | Express + Winston | JSON estructurado | Errores de negocio vienen como INFO |
+| `tecoposv2` | NestJS | Formato Nest nativo | Webhooks de pago frecuentes |
+| `gateway` | NestJS | Formato Nest nativo | Más tráfico, monitorea autenticación como INFO |
+| `midas-dev` | NestJS | Formato Nest nativo | Muy ruidoso (webhooks de pago), k más alto |
+| `control` | NestJS + kafkajs | JSON mixto | Eventos de Kafka en JSON puro |
+| `controlbeta` | NestJS + kafkajs | JSON mixto | Igual que control, versión beta |
 
 ---
 
-## Cómo levantar el proyecto
+## Cómo se configura
 
-### Requisitos
+### El entorno (`.env`)
 
-- **Python 3.11+** (`python --version`)
-- **OpenSSH client** (incluido en Windows 10/11, Linux y macOS)
-- **Acceso al servidor con Loki** (sandbox Hetzner: `root@204.168.195.31`)
-- Editor recomendado: **VSCode** con extensión Python
-
-### 1. Clonar y entrar al directorio
+El parámetro más importante es `PROCESSOR_ENV`. Define el comportamiento completo del detector:
 
 ```bash
-cd processor
+# Para desarrollo: ve anomalías en 3 minutos, muy verboso
+PROCESSOR_ENV=local
+
+# Para staging: balance entre sensibilidad y ruido
+PROCESSOR_ENV=development
+
+# Para producción: conservador, pocas falsas alarmas
+PROCESSOR_ENV=production
 ```
 
-### 2. Crear y activar entorno virtual
+Qué cambia con cada entorno:
 
-**Windows PowerShell:**
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-# Si PowerShell bloquea el script:
-#   Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-```
+| | local | development | production |
+|--|-------|-------------|------------|
+| Tiempo hasta primera detección | ~3 min | ~10 min | ~50 min |
+| Sensibilidad (k) | 2.0 (alta) | 2.5 | 3.0 (baja) |
+| Historia consultada | 1 día | 3 días | 7 días |
+| Logs analizados | info + warn + error | warn + error | warn + error |
+| Formato del log propio | consola coloreada | consola | JSON |
 
-**Linux/macOS:**
+Para Telegram, en `.env`:
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+PROCESSOR_TELEGRAM__ENABLED=true
+PROCESSOR_TELEGRAM__BOT_TOKEN=tu-token-aqui
+PROCESSOR_TELEGRAM__CHAT_ID=tu-chat-id
 ```
 
-### 3. Instalar dependencias
+### La topología (`config.yaml`)
 
-**Con conexión a internet:**
-```bash
-pip install -r requirements.txt
-```
-
-**Sin internet (desde wheels pre-descargados):**
-```bash
-pip install --no-index --find-links wheels -r requirements.txt
-```
-
-Verifica la instalación:
-```bash
-python -c "import drain3, sklearn, httpx, pydantic, apscheduler, structlog, prometheus_client; print('OK')"
-```
-
-### 4. Abrir túnel SSH hacia Loki (solo si Loki es remoto)
-
-En una terminal aparte, dejarla abierta durante todo el desarrollo:
-
-```bash
-ssh -L 13100:localhost:3100 root@204.168.195.31
-```
-
-> Se usa `13100` en local porque Windows tiene los puertos `3000-3999` reservados por Hyper-V/Docker Desktop. Cualquier puerto alto sirve.
-
-Verifica que el túnel está vivo:
-```bash
-curl http://localhost:13100/ready
-# debe responder: ready
-```
-
-### 5. Ejecutar el procesador
-
-**Dry-run** (un único ciclo, imprime alertas hipotéticas y sale — útil para validar configuración):
-```bash
-python -m processor.main --dry-run
-```
-
-**Modo normal** (ciclo cada W minutos, Ctrl+C para detener):
-```bash
-python -m processor.main
-```
-
-Salida esperada (modo normal):
-```
-[info] processor_starting     W_min=5 H_days=7 defaults_k=3.0 services=[...]
-[info] loki_ready             url=http://localhost:13100
-[info] metrics_listening      port=8000
-[info] scheduler_started      interval_min=5
-[info] cycle_start            cycle_id=a2184344
-[info] cycle_done             cycle_id=a2184344 elapsed_sec=1.91
-```
-
----
-
-## Configuración
-
-Toda la configuración vive en **`config.yaml`**. Cualquier campo puede sobreescribirse con variables de entorno con prefijo `PROCESSOR_` y separador `__` para anidados (RNF-04 — env vars tienen mayor prioridad que el YAML).
-
-**Ejemplos:**
-
-```bash
-# Cambiar URL de Loki
-export PROCESSOR_LOKI__URL=http://loki.internal:3100
-
-# Hacer el procesador más sensible (k=2.0 en vez de 3.0)
-export PROCESSOR_PROCESSOR__DEFAULTS__THRESHOLD_K=2.0
-
-# Cambiar a logs JSON para producción
-export PROCESSOR_LOGGING__FORMAT=json
-```
-
-### Agregar un servicio nuevo (sin tocar código)
-
-Editar `config.yaml`:
+El `config.yaml` define **qué** servicios monitorear y sus particularidades — no los parámetros del algoritmo (esos los maneja el perfil de entorno):
 
 ```yaml
 processor:
   services:
-    - {name: apollo, profile: nestjs}                    # nuevo, default k=3.0
-    - {name: hermes-server, profile: kafkajs_json,       # nuevo
-       overrides: {threshold_k: 4.0}}                    # con k más permisivo
-```
+    - name: gateway
+      profile: nestjs
+      overrides:
+        threshold_k: 3.5              # gateway tiene más tráfico → umbral más alto
+        monitor_levels: [info, warn, error]  # necesita ver autenticación (INFO)
 
-### Agregar un formato de log nuevo
-
-1. Crear `processor/profiles/mi_formato.py` con clase decorada `@register`:
-
-```python
-from processor.profiles.base import ParsedLog
-from processor.profiles.registry import register
-from processor.settings import ProfileSpec
-
-@register
-class MiProfile:
-    name = "mi_formato"
-    @classmethod
-    def from_spec(cls, spec: ProfileSpec): ...
-    def parse(self, line: str) -> ParsedLog: ...
-```
-
-2. Importarlo en `processor/profiles/__init__.py` para que dispare el registro.
-3. Declararlo en `config.yaml`:
-```yaml
-profiles:
-  mi_formato:
-    type: mi_formato
-    # campos específicos de tu formato
+    - name: midas-dev
+      profile: nestjs
+      overrides:
+        threshold_k: 4.0              # muy ruidoso → ignorar variaciones pequeñas
 ```
 
 ---
 
-## Cómo probarlo
-
-### Tests unitarios
-
-```bash
-pytest tests/ -v
-```
-
-Salida esperada (27 tests cubren settings cross-validation, perfiles, threshold con resolver, history SQLite):
+## Cómo leer una notificación
 
 ```
-tests/test_history.py ............ 6 passed
-tests/test_profiles.py ............ 11 passed
-tests/test_settings_validation.py ............ 5 passed
-tests/test_threshold.py ............ 5 passed
-============ 27 passed in 0.28s ============
+🚨 3 anomalías detectadas · 23:47
 ```
+→ Hay 3 comportamientos inusuales en este ciclo
 
-### Smoke test E2E (un ciclo real contra Loki)
-
-```bash
-# Con el túnel SSH activo:
-python -m processor.main --dry-run
 ```
-
-Debe procesar todos los servicios habilitados, imprimir las alertas hipotéticas en JSON y salir 0.
-
-### Verificar métricas en vivo
-
-En una terminal, ejecuta el procesador en modo normal:
-```bash
-python -m processor.main
+🔴 gateway ↑ CRÍTICO
+   Slow GraphQL query: took <*> - getDashboard
+   5 ocurrencias · ~2.5× lo habitual (esperado ~2)
 ```
+→ **Rojo**: z-score alto, muy alejado de lo normal  
+→ **↑**: está subiendo (hay más de lo normal)  
+→ La plantilla agrupada (el `<*>` reemplaza el valor variable de tiempo)  
+→ Cuántas veces pasó y cuánto es el ratio respecto al promedio histórico
 
-En otra, después de ~15s:
-```bash
-curl -s http://localhost:8000/metrics | grep -E "drain_templates_total|service_threshold_k|logs_processed_total"
 ```
-
-Deberías ver contadores como:
+🆕 tecoposv2 ↑ NUEVO
+   AppModule dependencies initialized <*>
+   2 ocurrencias (antes constante en ~1)
 ```
-drain_templates_total{service="gateway"} 5.0
-service_threshold_k{service="gateway"} 2.5
-service_threshold_k{service="midas-dev"} 4.0
-logs_processed_total{level="error",service="gateway"} 24.0
+→ **Nuevo**: esta plantilla siempre tuvo el mismo valor y ahora cambió  
+→ Útil para detectar reinicios inesperados (el módulo se reinicializó 2 veces)
+
 ```
-
-### Iteración rápida durante desarrollo
-
-Para ver anomalías sin esperar 7 días de histórico, baja temporalmente estos valores (en `config.yaml` o vía env vars):
-
-```yaml
-processor:
-  schedule_interval_minutes: 1     # ciclo cada minuto
-  history_days: 1                  # 1 día de histórico
-  defaults:
-    min_observations: 5            # mínimas ventanas para calcular σ
-
-logging:
-  level: "DEBUG"
-  format: "console"
+🟡 tecoposv1 ↑ atención
+   Auth token <*> for user <*>
+   10 ocurrencias · ~1.7× lo habitual (esperado ~6)
+   ↳ co-ocurre con otras de este ciclo
 ```
+→ **Amarillo**: anómalo pero no crítico  
+→ `↳ co-ocurre`: está agrupado con otras anomalías del mismo ciclo → problema sistémico
 
-Para forzar una anomalía artificialmente, reiniciar un pod en el sandbox:
-```bash
-ssh root@204.168.195.31 "kubectl delete pod -n tecopos-observability log-replay-gateway"
 ```
-
-El procesador detectará el spike en 1-2 ciclos. Verás `anomalies_detected_total{service="gateway"}` incrementar.
+📊 1 crítica · 1 con atención · 1 nueva
+🔗 1 cluster co-ocurrente (2 anomalías agrupadas)
+```
+→ Resumen: cuántas hay de cada tipo y si forman grupos
 
 ---
 
-## Métricas Prometheus
+## Cómo arrancar
 
-Todas en `http://localhost:8000/metrics`:
+### Requisitos previos
 
-| Métrica | Tipo | Labels | Descripción |
-|---|---|---|---|
-| `drain_templates_total` | Gauge | `service` | Plantillas aprendidas por Drain |
-| `logs_processed_total` | Counter | `service`, `level` | Logs procesados por nivel |
-| `anomalies_detected_total` | Counter | `service`, `direction` | Anomalías up/down |
-| `service_threshold_k` | Gauge | `service` | k efectivo por servicio (visualiza overrides) |
-| `processor_cycle_duration_seconds` | Histogram | — | Duración de cada ciclo |
-| `processor_errors_total` | Counter | `module`, `service` | Errores por módulo y servicio |
+- Python 3.11+
+- Acceso a Loki (en local: SSH tunnel al sandbox)
+- Credenciales de Telegram (opcional pero recomendado)
 
----
-
-## Notificaciones por Telegram
-
-Canal opcional paralelo a AlertManager. **Un solo mensaje por ciclo** (no spamea), con todas las anomalías agrupadas. Falla silenciosa si Telegram no responde.
-
-### Setup (5 minutos)
-
-**1. Crear bot.** En Telegram, abre [@BotFather](https://t.me/BotFather):
-```
-/newbot
-<nombre del bot, ej: tecopos-anomaly-bot>
-<username, debe terminar en _bot>
-```
-BotFather te devuelve un token tipo `123456789:ABCdefGhIJklmNoPQrsTUvwxYZ`.
-
-**2. Obtener `chat_id`.** Abre conversación con tu bot (búscalo por username), envía `/start`. Luego visita en el navegador:
-```
-https://api.telegram.org/bot<TU_TOKEN>/getUpdates
-```
-Busca `"chat":{"id":<chat_id>,...}` en la respuesta. Es un número entero (positivo para chats privados, negativo para grupos).
-
-**3. Exportar env vars.**
-
-Linux/macOS:
-```bash
-export PROCESSOR_TELEGRAM__ENABLED=true
-export PROCESSOR_TELEGRAM__BOT_TOKEN="123456789:ABC..."
-export PROCESSOR_TELEGRAM__CHAT_ID="123456789"
-```
-
-Windows PowerShell:
-```powershell
-$env:PROCESSOR_TELEGRAM__ENABLED="true"
-$env:PROCESSOR_TELEGRAM__BOT_TOKEN="123456789:ABC..."
-$env:PROCESSOR_TELEGRAM__CHAT_ID="123456789"
-```
-
-**4. Arrancar el procesador** — cuando detecte anomalías recibirás un mensaje por chat.
-
-### Configuración avanzada
-
-En `config.yaml`:
-
-```yaml
-telegram:
-  enabled: false                  # global on/off
-  timeout_seconds: 10
-  min_severity: "warning"         # "warning" (todas) o "critical" (|z|>=5 solamente)
-```
-
-> El token y chat_id **nunca deben ir en `config.yaml`** — usa env vars para mantenerlos fuera de git.
-
-### Formato del mensaje (HTML)
-
-```
-Anomalias detectadas: 3
-
-[CRIT] gateway (up)
-  plantilla: login failed for <*>
-  frecuencia: 200 (mu=10.0, sigma=2.0, z=95.00)
-  cluster: 0
-
-[CRIT] tecoposv1 (up)
-  plantilla: db connection lost
-  frecuencia: 50 (mu=5.0, sigma=1.0, z=45.00)
-  cluster: 0
-
-[WARN] midas-dev (down)
-  plantilla: silence
-  frecuencia: 0 (mu=100.0, sigma=10.0, z=-10.00)
-  cluster: -1
-```
-
-### Probar la integración antes de producirla
-
-```bash
-export PROCESSOR_TELEGRAM__ENABLED=true
-export PROCESSOR_TELEGRAM__BOT_TOKEN="..."
-export PROCESSOR_TELEGRAM__CHAT_ID="..."
-python -m processor.main --dry-run
-```
-
-En `--dry-run` el publisher imprime el mensaje en stdout (`telegram_dry_run`) **sin enviarlo realmente** — ideal para validar formato y filtro de severidad.
-
----
-
-## Decisiones de diseño
-
-| Decisión | Por qué |
-|---|---|
-| **Strategy + Registry para perfiles** | Open/Closed Principle. Agregar un formato = 1 clase + 1 entry YAML. |
-| **Misma `JsonProfile` para kafkajs y Winston** | `level_field`, `message_field` declarativos. Una clase, N formatos. |
-| **Inyección de dependencias (`Settings` por constructor)** | DIP (SOLID). Sin `settings` global. Testable. |
-| **Cross-validation en `Settings`** | Falla en startup, no en producción. |
-| **Per-service overrides de `threshold_k` / `min_observations`** | dev (ruidoso) y prod (estable) viven en el mismo binario. |
-| **Histórico en SQLite con WAL + `user_version`** | Atómico, recuperable de crashes, migrable. Cero bootstrap tras reinicio. |
-| **`max_workers=1` en APScheduler** | Sin ciclos solapados, sin contención en SQLite. |
-| **`contextvars` con `cycle_id` y `service`** | Trazabilidad estructurada — cada log se puede filtrar por ciclo. |
-| **Modo `--dry-run`** | Defensa académica sin spam a AlertManager. |
-| **Env vars > YAML > defaults** | RNF-04 (Configurabilidad sin recompilación). |
-| **Fallback a stdout si AlertManager down** | Sandbox no tiene AlertManager y no debe fallar el procesador. |
-
----
-
-## Despliegue en Docker / Kubernetes
-
-### Build local
-
-```bash
-# Online
-docker build -t tecopos-processor:dev .
-
-# Offline (Cuba)
-docker build -t tecopos-processor:dev --build-arg PIP_NO_INDEX=--no-index .
-```
-
-### Ejecutar contenedor (apuntando a Loki del túnel SSH)
-
-```bash
-docker run --rm \
-  -p 8000:8000 \
-  -e PROCESSOR_LOKI__URL=http://host.docker.internal:13100 \
-  -v $(pwd)/drain_state:/app/drain_state \
-  tecopos-processor:dev
-```
-
-### Despliegue en k3s del sandbox
-
-Manifiestos en `../observability/kubernetes/` (`50-processor-*.yaml`). Pasos detallados en `../observability/despliegue/2-PASOS-SERVIDOR.md`.
-
----
-
-## Troubleshooting
-
-### "0 logs encontrados" en algún servicio
-
-1. Verificar túnel SSH: `curl http://localhost:13100/ready`
-2. Verificar que el servicio existe en Loki:
-   ```bash
-   curl "http://localhost:13100/loki/api/v1/label/service/values"
-   ```
-3. Verificar nombre exacto del servicio (sin guiones extra ni espacios).
-
-### "Drain crashea al cargar estado"
-
-Probable causa: cambio de versión de drain3 o config incompatible.
-
-```bash
-rm -rf drain_state/*.bin
-# Reiniciar el procesador — reaprende desde cero
-```
-
-### `anomalies_detected_total = 0` siempre
-
-- **Histórico insuficiente** — bajar `min_observations` a 5 y esperar 5 ciclos.
-- **σ muy alto** — bajar `threshold_k` a 2.0 (o usar override por servicio).
-- **Tráfico constante** — los log-replay pods emiten patrones muy regulares. Induce una anomalía artificial (ver [Iteración rápida](#iteración-rápida-durante-desarrollo)).
-
-### "AlertManager unreachable" en logs
-
-**Esperado en sandbox** — no hay AlertManager desplegado. El procesador hace fallback a stdout estructurado. Buscar `anomaly_detected` en los logs para ver las anomalías.
-
-### `max_entries_limit_per_query` exceeded
-
-Loki del sandbox limita queries a 5000 entries. Si necesitas más, edita `loki.max_lines` en `config.yaml` (default ya es 5000).
-
-### "Permission denied" al activar venv en PowerShell
+### Instalación
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
-.\.venv\Scripts\Activate.ps1
+# Crear entorno virtual
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+
+# Instalar dependencias (desde wheels offline si no hay internet)
+pip install --no-index --find-links wheels -r requirements.txt
+# o con internet:
+pip install -r requirements.txt
+```
+
+### Configurar
+
+```powershell
+# Copiar el template de configuración
+copy .env.example .env
+
+# Editar .env: poner PROCESSOR_ENV=local y las credenciales de Telegram
+notepad .env
+```
+
+### Levantar el tunnel SSH (para usar Loki del sandbox)
+
+```powershell
+ssh -L 13100:localhost:3100 root@204.168.195.31
+```
+
+### Ejecutar
+
+```powershell
+# Modo normal (corre indefinidamente, ciclo cada W minutos)
+.venv\Scripts\python.exe -m processor.main
+
+# Modo dry-run: corre un ciclo, muestra qué alertaría, no manda nada
+.venv\Scripts\python.exe -m processor.main --dry-run
+
+# Ver las métricas en Prometheus
+# http://localhost:8000/metrics
 ```
 
 ---
 
-## Referencias académicas
+## La estructura del código
 
-- **Cap. II II.3.3** — diseño del pipeline (W, H, k, parámetros Drain).
-- **Cap. III** — implementación (este componente).
-- **RNF-04** — configurabilidad sin modificar código.
-- **Zhu et al. (2019)** — algoritmo Drain.
-- **Jiang et al. (2024)** — evaluación de log parsing.
-- **Ester et al. (1996)** — DBSCAN.
+```
+processor/
+├── processor/               ← El paquete Python
+│   ├── main.py              ← Punto de entrada y orquestador del ciclo
+│   ├── settings.py          ← Configuración: YAML + env vars + perfiles
+│   ├── loki_client.py       ← Cliente HTTP para consultar Loki
+│   ├── pre_parser.py        ← Router: elige el perfil correcto por servicio
+│   ├── profiles/            ← Implementaciones de cada perfil de log
+│   │   ├── regex.py         ← Para NestJS (expresión regular)
+│   │   ├── json_path.py     ← Para kafkajs y Winston (JSON)
+│   │   └── fallback.py      ← Para formatos desconocidos
+│   ├── drain_parser.py      ← Wrapper de Drain3 con persistencia por servicio
+│   ├── threshold.py         ← El detector μ ± kσ con filtros anti-ruido
+│   ├── dbscan_cluster.py    ← Clustering de anomalías co-ocurrentes
+│   ├── history.py           ← Persistencia del histórico en SQLite
+│   ├── alert_publisher.py   ← Envío a AlertManager
+│   ├── telegram_publisher.py← Formato y envío de notificaciones Telegram
+│   └── metrics.py           ← Contadores y gauges para Prometheus
+│
+├── drain_state/             ← Se crea al ejecutar (no commitear)
+│   ├── gateway.bin          ← Estado de Drain para gateway
+│   ├── tecoposv1.bin        ← Estado de Drain para tecoposv1
+│   └── history.db           ← SQLite con el histórico de frecuencias
+│
+├── config.yaml              ← Topología de servicios y sus particularidades
+├── .env.example             ← Template de variables de entorno
+├── .env                     ← Tu configuración local (gitignored)
+├── requirements.txt         ← Dependencias Python
+├── Dockerfile               ← Para deployment en Kubernetes
+│
+├── ALGORITMO.md             ← Documentación técnica profunda del algoritmo
+└── DEFENSA_TRIBUNAL.md      ← Guía de preparación para la defensa oral
+```
 
 ---
 
-## Licencia
+## Preguntas frecuentes
 
-Ver [LICENSE](LICENSE).
+**¿Por qué no usa machine learning?**
+
+Porque para este problema el modelo estadístico es suficiente y tiene ventajas importantes: es interpretable (puedes ver exactamente por qué se disparó una alerta), no requiere datos etiquetados para entrenar, y se actualiza automáticamente con cada ciclo sin necesidad de reentrenamiento.
+
+**¿Por qué no basta con Grafana + reglas manuales?**
+
+Grafana detecta lo que ya sabes que puede fallar. Este sistema detecta lo que no anticipaste. Además, Grafana requiere configurar una regla por cada tipo de error — con decenas de plantillas por servicio, eso no escala. El procesador no necesita saber de antemano qué va a fallar.
+
+**¿Qué pasa si reinio el procesador?**
+
+El estado de Drain (las plantillas aprendidas) y el histórico de frecuencias (el SQLite) sobreviven al reinicio porque están en disco. El procesador continúa exactamente donde quedó.
+
+**¿Qué pasa si borro `drain_state/`?**
+
+El procesador arranca de cero. Necesitará `min_observations` ciclos (3 en local, 10 en producción) para acumular historia antes de empezar a detectar. Durante esos ciclos, generará muchas alertas "NUEVO" porque todo es nuevo para él.
+
+**¿Genera muchas falsas alarmas?**
+
+Con `PROCESSOR_ENV=production` y los filtros activos: 1-3 alertas por hora en condiciones normales, 5-15 durante un incidente real. Con `local` y todo activado: puede generar más ruido — está diseñado para eso, para que puedas ver que funciona rápido.
+
+**¿Cuánta memoria y CPU usa?**
+
+Muy poco. El ciclo completo de 6 servicios procesa hasta 30.000 líneas de log en ~15 segundos. Entre ciclos no consume nada. El SQLite con 7 días de historia ocupa < 50MB.
+
+---
+
+## Glosario
+
+| Término | Qué significa aquí |
+|---------|-------------------|
+| **Plantilla** | Un patrón de mensaje de log con los valores variables reemplazados por `<*>`. Ejemplo: `"Query took <*>ms"` |
+| **Drain** | Algoritmo que agrupa mensajes similares en plantillas automáticamente |
+| **μ (mu)** | Promedio histórico de veces que aparece una plantilla por ciclo |
+| **σ (sigma)** | Desviación estándar del histórico — qué tan variable es normalmente |
+| **k** | El multiplicador de sensibilidad. k=3 significa "alerta si está a más de 3 sigmas de la media" |
+| **z-score** | Cuántas sigmas se aleja el valor actual de la media: `z = (actual - μ) / σ` |
+| **DBSCAN** | Algoritmo de clustering que agrupa anomalías que ocurren juntas en el mismo ciclo |
+| **Cluster co-ocurrente** | Varias anomalías de distintos servicios que el DBSCAN agrupa — indica problema sistémico |
+| **W** | Ancho de la ventana de análisis (cada cuántos minutos corre el procesador) |
+| **H** | Días de historia que se consultan para calcular μ y σ |
+| **Loki** | Base de datos de logs (parte del stack de Grafana Labs) |
+| **LogQL** | Lenguaje de query de Loki, similar a SQL pero para logs |
+| **Sentinel z=±1000** | Valor especial que se usa cuando σ=0 (patrón constante que cambió) para evitar división por cero |
