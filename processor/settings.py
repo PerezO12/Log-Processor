@@ -16,9 +16,10 @@ Diseno:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -68,11 +69,26 @@ class TelegramConfig(BaseModel):
 class ProcessorDefaults(BaseModel):
     threshold_k: float = 3.0
     min_observations: int = 10
+    min_count: float = 0.0      # media minima para monitorear una plantilla
+    min_delta: int = 0          # cambio absoluto minimo para reportar anomalia
+    monitor_levels: List[str] = Field(
+        default_factory=lambda: ["warn", "error"],
+    )
+    """Niveles de log que se envian a Drain para deteccion.
+
+    Valores posibles: info, warn, error, debug.
+    Por defecto solo warn+error para evitar ruido de logs operacionales INFO.
+    Anadir 'info' por servicio si hay patrones INFO criticos de negocio
+    (p.ej. 'Payment processed' o 'User authenticated') que quieras monitorear.
+    """
 
 
 class ServiceOverrides(BaseModel):
     threshold_k: Optional[float] = None
     min_observations: Optional[int] = None
+    min_count: Optional[float] = None
+    min_delta: Optional[int] = None
+    monitor_levels: Optional[List[str]] = None
 
 
 class ServiceConfig(BaseModel):
@@ -149,6 +165,9 @@ class ResolvedService:
     profile_spec: ProfileSpec
     threshold_k: float
     min_observations: int
+    min_count: float
+    min_delta: int
+    monitor_levels: List[str]
     enabled: bool
 
 
@@ -228,6 +247,9 @@ class Settings(BaseSettings):
                 min_observations=(
                     o.min_observations if o.min_observations is not None else d.min_observations
                 ),
+                min_count=o.min_count if o.min_count is not None else d.min_count,
+                min_delta=o.min_delta if o.min_delta is not None else d.min_delta,
+                monitor_levels=o.monitor_levels if o.monitor_levels is not None else d.monitor_levels,
                 enabled=svc.enabled,
             )
         raise KeyError(f"service not declared: {name}")
@@ -242,6 +264,85 @@ class Settings(BaseSettings):
 
 
 # ----------------------------------------------------------------------------
+# Perfiles de entorno
+# ----------------------------------------------------------------------------
+#
+# PROCESSOR_ENV controla el perfil activo. Prioridad completa (mayor primero):
+#   1. Variables de entorno PROCESSOR_*  (siempre ganan sobre todo)
+#   2. config.yaml (valores explicitos del usuario)
+#   3. Perfil PROCESSOR_ENV (local | development | production)
+#   4. Defaults de los modelos pydantic
+#
+# Uso:
+#   PROCESSOR_ENV=local         iteracion rapida, todos los niveles, DEBUG
+#   PROCESSOR_ENV=development   balance sensibilidad/ruido, INFO
+#   PROCESSOR_ENV=production    conservador, solo warn+error, JSON
+
+_ENV_PROFILES: Dict[str, Dict[str, Any]] = {
+    "local": {
+        # Iteracion rapida: detecta en 3 ciclos, muy sensible, verbose
+        "processor": {
+            "schedule_interval_minutes": 1,
+            "history_days": 1,
+            "defaults": {
+                "threshold_k": 2.0,
+                "min_observations": 3,
+                "min_count": 1.0,
+                "min_delta": 1,
+                "monitor_levels": ["info", "warn", "error"],
+            },
+        },
+        "logging": {"level": "DEBUG", "format": "console"},
+    },
+    "development": {
+        # Balance: detecta en 5 ciclos, algo de ruido tolerable
+        "processor": {
+            "schedule_interval_minutes": 2,
+            "history_days": 3,
+            "defaults": {
+                "threshold_k": 2.5,
+                "min_observations": 5,
+                "min_count": 1.5,
+                "min_delta": 2,
+                "monitor_levels": ["warn", "error"],
+            },
+        },
+        "logging": {"level": "INFO", "format": "console"},
+    },
+    "production": {
+        # Conservador: base solida, solo anomalias reales, JSON para Loki
+        "processor": {
+            "schedule_interval_minutes": 5,
+            "history_days": 7,
+            "defaults": {
+                "threshold_k": 3.0,
+                "min_observations": 10,
+                "min_count": 3.0,
+                "min_delta": 3,
+                "monitor_levels": ["warn", "error"],
+            },
+        },
+        "logging": {"level": "INFO", "format": "json"},
+    },
+}
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Fusiona `override` sobre `base` recursivamente. `override` gana en conflictos.
+
+    Regla: si ambos lados tienen un dict para la misma clave, se fusionan.
+    En cualquier otro caso, override prevalece (o se agrega si solo esta en override).
+    """
+    result = base.copy()
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+# ----------------------------------------------------------------------------
 # Factory
 # ----------------------------------------------------------------------------
 def _load_yaml(path: str) -> dict:
@@ -253,19 +354,25 @@ def _load_yaml(path: str) -> dict:
 
 
 def load_settings(config_path: str = "config.yaml") -> Settings:
-    """Carga `config.yaml` y aplica overrides desde env vars.
+    """Carga config.yaml, aplica perfil PROCESSOR_ENV y overrides de env vars.
 
     Prioridad de fuentes (mayor primero, RNF-04):
-        1. Variables de entorno PROCESSOR_*
-        2. Valores del config.yaml
-        3. Defaults de los modelos pydantic
+        1. Variables de entorno PROCESSOR_*  (siempre ganan)
+        2. config.yaml  (topologia de servicios, overrides por servicio)
+        3. Perfil PROCESSOR_ENV  (algoritmo defaults segun entorno)
+        4. Defaults de los modelos pydantic
 
-    Esta es la unica funcion que toca el filesystem. Llamar desde `main()`
-    e inyectar el resultado al resto de modulos (DI).
+    El perfil actua como base: si config.yaml declara un valor para la misma
+    clave que el perfil, config.yaml gana. Esto permite que los overrides por
+    servicio (p.ej. gateway threshold_k=2.5) se respeten en todos los entornos.
     """
     yaml_data = _load_yaml(config_path)
 
-    # `init` source recibe el YAML como base. Las env vars (env source) tienen
-    # mayor prioridad que init en el orden por defecto de pydantic-settings,
-    # por lo que sobreescriben individualmente los campos del YAML.
-    return Settings(**yaml_data)
+    env_name = os.environ.get("PROCESSOR_ENV", "production").lower()
+    profile = _ENV_PROFILES.get(env_name, _ENV_PROFILES["production"])
+
+    # Perfil es la BASE: yaml sobreescribe solo donde tiene valores explicitos.
+    # Asi los overrides por servicio de config.yaml siempre se respetan.
+    merged = _deep_merge(base=profile, override=yaml_data)
+
+    return Settings(**merged)

@@ -29,7 +29,7 @@ import time
 import uuid
 from collections import Counter as Counter_dict
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import structlog
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -51,7 +51,7 @@ from processor.metrics import (
 from processor.pre_parser import PreParser
 from processor.settings import Settings, load_settings
 from processor.telegram_publisher import TelegramPublisher
-from processor.threshold import Anomaly, TemplateFrequency, detect_anomalies
+from processor.threshold import Anomaly, TemplateFrequency, ThresholdParams, detect_anomalies
 
 
 # ----------------------------------------------------------------------------
@@ -102,9 +102,19 @@ class Processor:
         self._publisher = AlertPublisher(settings, dry_run=dry_run)
         self._telegram = TelegramPublisher(settings, dry_run=dry_run)
 
-        # Resolver cacheado: nombre_servicio -> (k, min_obs).
-        self._thresholds: Dict[str, Tuple[float, int]] = {
-            svc.name: (svc.threshold_k, svc.min_observations)
+        # Resolver cacheado: nombre_servicio -> ThresholdParams.
+        self._thresholds: Dict[str, ThresholdParams] = {
+            svc.name: ThresholdParams(
+                k=svc.threshold_k,
+                min_observations=svc.min_observations,
+                min_count=svc.min_count,
+                min_delta=svc.min_delta,
+            )
+            for svc in settings.enabled_services()
+        }
+        # Niveles de log que se envian a Drain por servicio (set para O(1) lookup).
+        self._monitor_levels: Dict[str, frozenset] = {
+            svc.name: frozenset(svc.monitor_levels)
             for svc in settings.enabled_services()
         }
         # Publicar el k efectivo como gauge desde el arranque.
@@ -114,11 +124,15 @@ class Processor:
     # ------------------------------------------------------------------
     # Resolver para threshold.detect_anomalies
     # ------------------------------------------------------------------
-    def _resolve(self, service: str) -> Tuple[float, int]:
+    def _resolve(self, service: str) -> ThresholdParams:
         return self._thresholds.get(
             service,
-            (self._settings.processor.defaults.threshold_k,
-             self._settings.processor.defaults.min_observations),
+            ThresholdParams(
+                k=self._settings.processor.defaults.threshold_k,
+                min_observations=self._settings.processor.defaults.min_observations,
+                min_count=self._settings.processor.defaults.min_count,
+                min_delta=self._settings.processor.defaults.min_delta,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -193,10 +207,16 @@ class Processor:
 
         counts: Counter_dict = Counter_dict()
         templates: Dict[int, str] = {}
+        allowed_levels = self._monitor_levels.get(service, frozenset({"warn", "error"}))
         for entry in logs:
             parsed = self._pre_parser.parse(service, entry.line)
             LOGS_PROCESSED.labels(service=service, level=parsed.level).inc()
             if parsed.level == "unknown":
+                continue
+            # Filtrar por nivel: solo enviar a Drain los niveles configurados.
+            # INFO operacional (conexiones DB, health checks, etc.) se contabiliza
+            # en la metrica LOGS_PROCESSED pero no entra al detector de anomalias.
+            if parsed.level not in allowed_levels:
                 continue
             result = self._drain.add(service, parsed.message)
             if result is None:

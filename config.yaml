@@ -1,18 +1,23 @@
 # Configuracion del procesador de deteccion de anomalias (Cap. III, RNF-04).
 #
-# Todos los parametros son sobreescribibles por variables de entorno con prefijo
-# PROCESSOR_ y separador __ para anidados (via pydantic-settings).
+# ============================================================================
+# PERFILES DE ENTORNO (PROCESSOR_ENV)
+# ============================================================================
+# Los parametros del algoritmo (threshold_k, min_observations, etc.) los
+# gestiona el perfil activo definido en settings.py. No los toques aqui
+# salvo que quieras un override explicito para TODOS los entornos.
 #
-#   PROCESSOR_LOKI__URL=http://loki:3100      sobreescribe loki.url
-#   PROCESSOR_PROCESSOR__DEFAULTS__THRESHOLD_K=2.5
+#   PROCESSOR_ENV=local         W=1min, H=1d, k=2.0, DEBUG, todos los niveles
+#   PROCESSOR_ENV=development   W=2min, H=3d, k=2.5, INFO, warn+error
+#   PROCESSOR_ENV=production    W=5min, H=7d, k=3.0, INFO/JSON, warn+error
+#
+# Cualquier variable de entorno PROCESSOR_* sobreescribe el perfil:
+#   PROCESSOR_PROCESSOR__DEFAULTS__THRESHOLD_K=4.0
+#   PROCESSOR_LOKI__URL=http://loki:3100
 #
 # En docker-compose este archivo se monta como ConfigMap.
-# En local se carga desde la raiz del proyecto.
-#
-# === PERFIL DE TEST/DESARROLLO ACTIVO ===
-# Los valores actuales (W=1, H=1, min_observations=3, k=2.0) estan ajustados
-# para iteracion rapida: empieza a detectar anomalias en 3-5 min.
-# Para produccion, restaurar los valores comentados al lado de cada parametro.
+# En local se carga desde la raiz del proyecto junto al .env.
+# ============================================================================
 
 # ----------------------------------------------------------------------------
 # Fuente de datos
@@ -24,7 +29,7 @@ loki:
   timeout_seconds: 30
 
 # ----------------------------------------------------------------------------
-# Destino de alertas
+# Destino de alertas (AlertManager)
 # ----------------------------------------------------------------------------
 alertmanager:
   url: "http://alertmanager:9093"
@@ -33,52 +38,66 @@ alertmanager:
 
 # ----------------------------------------------------------------------------
 # Notificaciones via Telegram (canal opcional, paralelo a AlertManager)
-# El token y chat_id se exportan como env vars (NO commitear en este archivo):
+# Configurar via .env o env vars — NO hardcodear tokens aqui:
 #   PROCESSOR_TELEGRAM__ENABLED=true
 #   PROCESSOR_TELEGRAM__BOT_TOKEN=<token de BotFather>
 #   PROCESSOR_TELEGRAM__CHAT_ID=<id del chat>
 # ----------------------------------------------------------------------------
 telegram:
-  enabled: false                  # default off; activar via env
-  bot_token: ""                   # exportar PROCESSOR_TELEGRAM__BOT_TOKEN
-  chat_id: ""                     # exportar PROCESSOR_TELEGRAM__CHAT_ID
+  enabled: false
+  bot_token: ""
+  chat_id: ""
   timeout_seconds: 10
-  min_severity: "warning"         # "warning" envia todas; "critical" solo |z|>=5
+  min_severity: "warning"         # "warning" = todas; "critical" = solo |z|>=5
 
 # ----------------------------------------------------------------------------
 # Logica del procesador
+# NOTA: schedule_interval_minutes e history_days los gestiona PROCESSOR_ENV.
+# Aqui solo van los overrides POR SERVICIO (caracteristicas del servicio,
+# no del entorno).
 # ----------------------------------------------------------------------------
 processor:
-  schedule_interval_minutes: 1    # W: TEST (prod = 5)
-  history_days: 1                 # H: TEST (prod = 7)
-
-  # Valores por defecto aplicados a todos los servicios.
-  # Pueden sobreescribirse por servicio en `services[].overrides`.
-  defaults:
-    threshold_k: 2.0              # k: TEST sensible (prod = 3.0)
-    min_observations: 3           # TEST (prod = 10) — empieza a detectar tras 3 ciclos
-
   # Servicios a monitorear. Cada uno apunta a un perfil de `profiles:`.
+  # `overrides` permite ajustar parametros para servicios con trafico
+  # o nivel de ruido particular — se aplican sobre los defaults del perfil.
   services:
     - name: tecoposv1
       profile: winston_json
+      overrides:
+        # tecoposv1 (Express+Winston) emite errores de negocio como INFO:
+        # "Payment processed", "Auth token validated", etc.
+        monitor_levels: [info, warn, error]
+
     - name: tecoposv2
       profile: nestjs
+      # defaults del perfil son suficientes para tecoposv2
+
     - name: gateway
       profile: nestjs
       overrides:
-        threshold_k: 1.8          # mas trafico, k mas estricto
+        # gateway tiene mas trafico que los demas (API edge):
+        # threshold mas alto para no alertar por varianza normal de trafico
+        threshold_k: 3.5
+        # autenticacion y sesiones se loguean como INFO en NestJS:
+        # "User authenticated", "JWT validated", "Unauthorized request"
+        monitor_levels: [info, warn, error]
+
     - name: midas-dev
       profile: nestjs
       overrides:
-        threshold_k: 2.5          # mas ruidoso, k mas laxo
+        # midas-dev es el servicio mas ruidoso (webhooks de pago frecuentes):
+        # k mas laxo para ignorar varianza normal de eventos de pago
+        threshold_k: 4.0
+
     - name: control
       profile: kafkajs_json
+
     - name: controlbeta
       profile: kafkajs_json
 
 # ----------------------------------------------------------------------------
-# Perfiles de parsing (Strategy pattern).
+# Perfiles de parsing (Strategy pattern, Cap. II II.3.2).
+# Cada servicio apunta a uno de estos perfiles en processor.services.
 # ----------------------------------------------------------------------------
 profiles:
   nestjs:
@@ -115,7 +134,7 @@ drain:
   state_save_interval: 5
 
 # ----------------------------------------------------------------------------
-# DBSCAN para clustering de anomalias (Cap. II II.3.3, etapa 3)
+# DBSCAN para clustering de anomalias co-ocurrentes (Cap. II II.3.3, etapa 3)
 # ----------------------------------------------------------------------------
 dbscan:
   eps: 0.5
@@ -126,22 +145,15 @@ dbscan:
 # Persistencia del historico mu/sigma entre reinicios.
 # ----------------------------------------------------------------------------
 history:
-  backend: sqlite                 # sqlite | memory
+  backend: sqlite
   path: "./drain_state/history.db"
-  flush_every_cycles: 1           # 1 = cada ciclo (safest), >1 batchea
+  flush_every_cycles: 1
   schema_version: 1
 
 # ----------------------------------------------------------------------------
-# Endpoint Prometheus /metrics (Dashboard 3)
+# Endpoint Prometheus /metrics
 # ----------------------------------------------------------------------------
 metrics:
   enabled: true
   port: 8000
   host: "0.0.0.0"
-
-# ----------------------------------------------------------------------------
-# Logging del propio procesador
-# ----------------------------------------------------------------------------
-logging:
-  level: "INFO"                   # DEBUG en desarrollo, INFO en test/prod
-  format: "console"               # json | console
