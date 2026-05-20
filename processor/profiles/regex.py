@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import ClassVar, Dict, Pattern
 
-from processor.profiles.base import BaseProfile, ParsedLog
+from processor.profiles.base import BaseProfile, ParsedLog, normalize_level
 from processor.profiles.registry import register
 from processor.settings import ProfileSpec
 
@@ -50,7 +50,7 @@ class RegexProfile:
             if k not in ("level", "message") and v is not None
         }
         return ParsedLog(
-            level=self._level_map.get(raw_level, raw_level.lower()),
+            level=self._level_map.get(raw_level, normalize_level(raw_level)),
             message=m.group("message"),
             profile=self.name,
             extras=extras,

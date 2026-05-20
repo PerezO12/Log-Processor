@@ -25,6 +25,5 @@ apscheduler==3.10.4             # corre el ciclo cada W minutos
 structlog==24.4.0               # logs JSON para el procesador mismo
 prometheus-client==0.21.0       # endpoint /metrics (alimentara Dashboard 3)
 
-# --- Utilidades dev ---
-ipython==8.28.0                 # REPL comodo para experimentacion
-pytest==8.3.3                   # tests unitarios
+# --- python-dotenv (carga .env en desarrollo local) ---
+python-dotenv==1.2.2

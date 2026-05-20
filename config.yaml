@@ -23,9 +23,9 @@
 # Fuente de datos
 # ----------------------------------------------------------------------------
 loki:
-  url: "http://localhost:13100"   # SSH tunnel hacia el sandbox Hetzner
+  url: "http://localhost:13100"   # default; sobreescribir con PROCESSOR_LOKI__URL en .env
   query_step: "60s"
-  max_lines: 5000                 # limite de Loki sandbox: max_entries_limit_per_query=5000
+  max_lines: 5000
   timeout_seconds: 30
 
 # ----------------------------------------------------------------------------
@@ -37,11 +37,7 @@ alertmanager:
   timeout_seconds: 10
 
 # ----------------------------------------------------------------------------
-# Notificaciones via Telegram (canal opcional, paralelo a AlertManager)
-# Configurar via .env o env vars — NO hardcodear tokens aqui:
-#   PROCESSOR_TELEGRAM__ENABLED=true
-#   PROCESSOR_TELEGRAM__BOT_TOKEN=<token de BotFather>
-#   PROCESSOR_TELEGRAM__CHAT_ID=<id del chat>
+# Notificaciones via Telegram — credenciales en .env, no aqui
 # ----------------------------------------------------------------------------
 telegram:
   enabled: false
@@ -50,77 +46,138 @@ telegram:
   timeout_seconds: 10
   min_severity: "warning"         # "warning" = todas; "critical" = solo |z|>=5
 
-# ----------------------------------------------------------------------------
-# Logica del procesador
-# NOTA: schedule_interval_minutes e history_days los gestiona PROCESSOR_ENV.
-# Aqui solo van los overrides POR SERVICIO (caracteristicas del servicio,
-# no del entorno).
-# ----------------------------------------------------------------------------
+# ============================================================================
+# SERVICIOS MONITOREADOS
+# ============================================================================
+#
+# AGREGAR UN SERVICIO NUEVO (sin tocar codigo):
+#   1. Verificar que el nombre coincide exactamente con el label `service`
+#      en Loki. Puedes consultarlo en:
+#        http://<loki>:3100/loki/api/v1/label/service/values
+#   2. Elegir el perfil de log segun el formato:
+#        nestjs       → formato [Nest] PID - TIMESTAMP LEVEL [Context] mensaje
+#        kafkajs_json → JSON con campos level/message/logger/groupId
+#        winston_json → JSON con campos level/message/timestamp/label
+#        fallback     → cualquier texto plano (nivel=unknown, poca precision)
+#   3. Anadir la entrada en processor.services con los overrides necesarios.
+#      No hay limite de servicios. No se necesita reiniciar el procesador
+#      hasta el proximo ciclo — solo recargar config.
+#
+# AGREGAR UN FORMATO NUEVO (requiere codigo, solo si no encaja en los 3 anteriores):
+#   1. Crear processor/profiles/mi_formato.py con clase @register
+#   2. Importar en processor/profiles/__init__.py
+#   3. Declarar el perfil en la seccion `profiles:` de este archivo
+#   4. Usarlo en services igual que los existentes
+#
+# Servicios disponibles en el Loki de produccion (label service):
+#   Backends activos:  tecoposv1, tecoposv1-sso, tecoposv2, gateway, gatewaybeta,
+#                      midas-dev, control-server, controlbeta, apollo, hermes,
+#                      identitydev, identitybeta, reservas-server
+#   Infraestructura:   elasticsearch, minio, redis, redis-control, redis-identity,
+#                      redisbeta-control, redisbeta-identity
+#   Frontends/web:     controlweb, controlwebstaging, identity-web, identitybeta-web,
+#                      portal-sever, reservas-web, tecopos-admin, tecopos-portal-web,
+#                      tecopos-tiendav2, tecopos-tiendav2pro, tecopos-admin-ganma,
+#                      tecopos-alma, tarjetas-regalo, celebren-web, elgelato-landing,
+#                      imperial-landing
+# ============================================================================
 processor:
-  # Servicios a monitorear. Cada uno apunta a un perfil de `profiles:`.
-  # `overrides` permite ajustar parametros para servicios con trafico
-  # o nivel de ruido particular — se aplican sobre los defaults del perfil.
   services:
+
+    # --- Servicios activamente monitoreados ---
+
     - name: tecoposv1
       profile: winston_json
       overrides:
-        # tecoposv1 (Express+Winston) emite errores de negocio como INFO:
-        # "Payment processed", "Auth token validated", etc.
+        # Express + Winston: errores de negocio (pagos, auth) vienen como INFO
         monitor_levels: [info, warn, error]
 
     - name: tecoposv2
       profile: nestjs
-      # defaults del perfil son suficientes para tecoposv2
 
     - name: gateway
       profile: nestjs
       overrides:
-        # gateway tiene mas trafico que los demas (API edge):
-        # threshold mas alto para no alertar por varianza normal de trafico
-        threshold_k: 3.5
-        # autenticacion y sesiones se loguean como INFO en NestJS:
-        # "User authenticated", "JWT validated", "Unauthorized request"
-        monitor_levels: [info, warn, error]
+        threshold_k: 3.5              # API edge: mas trafico, k mas alto
+        monitor_levels: [info, warn, error]  # auth y sesiones son INFO aqui
+
+    - name: gatewaybeta
+      profile: nestjs
+      overrides:
+        threshold_k: 3.5              # mismas caracteristicas que gateway
 
     - name: midas-dev
       profile: nestjs
       overrides:
-        # midas-dev es el servicio mas ruidoso (webhooks de pago frecuentes):
-        # k mas laxo para ignorar varianza normal de eventos de pago
-        threshold_k: 4.0
+        threshold_k: 4.0              # webhooks de pago muy frecuentes → k laxo
 
-    - name: control
+    - name: control-server            # NOTA: en Loki es "control-server", no "control"
       profile: kafkajs_json
 
     - name: controlbeta
       profile: kafkajs_json
 
-# ----------------------------------------------------------------------------
-# Perfiles de parsing (Strategy pattern, Cap. II II.3.2).
-# Cada servicio apunta a uno de estos perfiles en processor.services.
-# ----------------------------------------------------------------------------
+    - name: apollo
+      profile: nestjs
+
+    - name: hermes
+      profile: nestjs
+
+    # --- Entorno beta/staging (mismos perfiles que sus pares de desarrollo) ---
+
+    - name: identitydev
+      profile: nestjs
+
+    - name: identitybeta
+      profile: nestjs
+
+    # --- Servicios disponibles pero deshabilitados (enabled: false) ---
+    # Habilitarlos cuando se quiera monitorearlos. Sin impacto mientras esten off.
+
+    - name: tecoposv1-sso
+      profile: winston_json
+      enabled: false
+
+    - name: reservas-server
+      profile: nestjs
+      enabled: false
+
+# ============================================================================
+# PERFILES DE PARSING
+# ============================================================================
+# Cada perfil define como extraer {level, message} de una linea de log.
+# Los servicios en processor.services referencian estos perfiles por nombre.
+#
+# Tipos disponibles:
+#   regex       → texto plano con patron; requiere grupos nombrados `level` y `message`
+#   json        → JSON estructurado; campos configurables
+#   fallback    → cualquier texto; level=unknown (Drain lo procesa pero no genera alertas)
+# ============================================================================
 profiles:
   nestjs:
     type: regex
+    # Formato: [Nest] PID  - DD/MM/YYYY HH:MM:SS AM  LEVEL [Context] message
     pattern: '^\[Nest\]\s+\d+.*?\s+(?P<level>LOG|WARN|ERROR|DEBUG|VERBOSE)\s+\[(?P<context>[^\]]+)\]\s+(?P<message>.+)$'
     level_map:
-      LOG: info
-      WARN: warn
-      ERROR: error
-      DEBUG: debug
+      LOG:     info
+      WARN:    warn
+      ERROR:   error
+      DEBUG:   debug
       VERBOSE: debug
 
   kafkajs_json:
     type: json
-    level_field: level
+    # Formato: {"level":"INFO","logger":"kafkajs","message":"...","groupId":"..."}
+    level_field:   level
     message_field: message
-    extra_fields: [logger, groupId, broker]
+    extra_fields:  [logger, groupId, broker]
 
   winston_json:
     type: json
-    level_field: level
+    # Formato: {"level":"info","message":"...","timestamp":"...","label":"..."}
+    level_field:   level
     message_field: message
-    extra_fields: [label]
+    extra_fields:  [label]
 
 # ----------------------------------------------------------------------------
 # Algoritmo Drain (Cap. II II.3.3, etapa 1)
@@ -142,7 +199,7 @@ dbscan:
   metric: "euclidean"
 
 # ----------------------------------------------------------------------------
-# Persistencia del historico mu/sigma entre reinicios.
+# Persistencia del historico mu/sigma entre reinicios
 # ----------------------------------------------------------------------------
 history:
   backend: sqlite

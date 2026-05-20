@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from typing import ClassVar, List
 
-from processor.profiles.base import BaseProfile, ParsedLog
+from processor.profiles.base import BaseProfile, ParsedLog, normalize_level
 from processor.profiles.registry import register
 from processor.settings import ProfileSpec
 
@@ -58,7 +58,7 @@ class JsonProfile:
         extras = {k: obj[k] for k in self._extra_fields if k in obj}
 
         return ParsedLog(
-            level=str(level_raw).lower(),
+            level=normalize_level(level_raw),
             message=str(message),
             profile=self.name,
             extras=extras,

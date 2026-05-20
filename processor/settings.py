@@ -366,6 +366,14 @@ def load_settings(config_path: str = "config.yaml") -> Settings:
     clave que el perfil, config.yaml gana. Esto permite que los overrides por
     servicio (p.ej. gateway threshold_k=2.5) se respeten en todos los entornos.
     """
+    # Cargar .env en os.environ ANTES de leer PROCESSOR_ENV.
+    # pydantic-settings tambien lo carga pero internamente, demasiado tarde.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(override=False)  # no sobreescribe vars ya presentes en el entorno real
+    except ImportError:
+        pass
+
     yaml_data = _load_yaml(config_path)
 
     env_name = os.environ.get("PROCESSOR_ENV", "production").lower()

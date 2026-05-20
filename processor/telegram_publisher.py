@@ -92,6 +92,23 @@ class TelegramPublisher:
         return ("🟡", "atención", 2)
 
     @staticmethod
+    def _context_hint(anomaly, z: float) -> str:
+        """Una linea de guia accionable segun tipo y direccion de la anomalia."""
+        direction = anomaly.direction
+        if z >= SENTINEL_Z:
+            if direction == "up":
+                return "❓ <i>Patrón nunca visto — ¿nuevo deploy, bug o cambio de config?</i>"
+            return "❓ <i>Patrón desaparecido — ¿ruta eliminada o servicio detenido?</i>"
+        if z >= CRITICAL_Z_THRESHOLD:
+            if direction == "up":
+                return "⚡ <i>Spike extremo — revisar errores en cascada o sobrecarga</i>"
+            return "⚡ <i>Caída extrema — posible servicio caído o ruta bloqueada</i>"
+        # atención
+        if direction == "up":
+            return "👁 <i>Frecuencia elevada — monitorear si escala en los próximos ciclos</i>"
+        return "👁 <i>Frecuencia baja — verificar que el servicio responde con normalidad</i>"
+
+    @staticmethod
     def _human_frequency(anomaly) -> str:
         """Describe la frecuencia en lenguaje natural (sin mu/sigma/z)."""
         cur, mu, sigma, direction = anomaly.current, anomaly.mean, anomaly.stddev, anomaly.direction
@@ -119,7 +136,10 @@ class TelegramPublisher:
 
     @staticmethod
     def _truncate_html(s: str, n: int = TEMPLATE_TRUNCATE) -> str:
-        clean = s if len(s) <= n else s[: n - 1] + "…"
+        # Reemplazar <*> de Drain por [...] para mayor legibilidad en Telegram.
+        # html.escape viene despues para no escapar los corchetes.
+        clean = s.replace("<*>", "[…]")
+        clean = clean if len(clean) <= n else clean[: n - 1] + "…"
         return html.escape(clean)
 
     @staticmethod
@@ -174,20 +194,23 @@ class TelegramPublisher:
 
         for idx, c in enumerate(sorted_anoms):
             a = c.anomaly
+            z = abs(a.z_score)
             icon, label, _ = self._classify(a)
             arrow = "↑" if a.direction == "up" else "↓"
             tpl = self._truncate_html(a.template_str)
             freq = self._human_frequency(a)
+            hint = self._context_hint(a, z)
 
-            extras = ""
+            cluster_line = ""
             if c.cluster_id >= 0:
-                extras = "\n   ↳ co-ocurre con otras de este ciclo"
+                cluster_line = "\n   🔗 <i>Falla junto a otros servicios → revisar infraestructura común</i>"
 
             block = (
                 f"{icon} <b>{html.escape(a.service)}</b> {arrow} <i>{label}</i>\n"
                 f"   <code>{tpl}</code>\n"
-                f"   {freq}"
-                f"{extras}\n"
+                f"   {freq}\n"
+                f"   {hint}"
+                f"{cluster_line}\n"
             )
             if total_len + len(block) > MAX_MESSAGE_LENGTH - 200:  # margen para footer
                 lines.append(f"…y {n - idx} más (mensaje truncado)")

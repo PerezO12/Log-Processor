@@ -8,7 +8,7 @@ registro (@register) en `PROFILE_REGISTRY`. Para anadir un perfil nuevo:
     3. Declarar en config.yaml: `profiles.<x>: {type: mi_perfil, ...}`
 """
 from processor.profiles import regex, json_path, fallback  # noqa: F401 (side-effect: registry)
-from processor.profiles.base import BaseProfile, ParsedLog
+from processor.profiles.base import BaseProfile, ParsedLog, normalize_level
 from processor.profiles.registry import PROFILE_REGISTRY, register
 
-__all__ = ["BaseProfile", "ParsedLog", "PROFILE_REGISTRY", "register"]
+__all__ = ["BaseProfile", "ParsedLog", "normalize_level", "PROFILE_REGISTRY", "register"]

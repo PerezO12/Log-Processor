@@ -1,16 +1,25 @@
-# Excluir del contexto de build cosas que no aportan al contenedor.
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
 *.egg-info/
 .pytest_cache/
 .venv/
 venv/
+
+# Secretos y config local — se pasan como env vars al contenedor
 .env
+.env.*
+
+# Control de versiones y CI
 .git/
 .gitignore
+.github/
+
+# Documentacion y archivos de dev
 *.md
-DESCARGA-OFFLINE.md
-README.md
+*.bak
+tests/
+
+# Estado de runtime — se crea en el contenedor (o se monta como volumen)
+drain_state/
