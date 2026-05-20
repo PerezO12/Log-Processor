@@ -8,9 +8,9 @@
 
 FROM python:3.11-slim
 
-# USE_PYPI=1 -> pip descarga de PyPI (permite actualizar deps).
-# USE_PYPI=0 -> pip solo usa los .whl en wheels/ (build offline).
-ARG USE_PYPI=0
+# USE_PYPI=1 -> pip descarga de PyPI (default, requiere internet en build).
+# USE_PYPI=0 -> pip solo usa los .whl en wheels/ (build offline sin internet).
+ARG USE_PYPI=1
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
