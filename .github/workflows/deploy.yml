@@ -1,0 +1,85 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "¿Entorno?"
+        required: true
+        type: choice
+        options:
+          - development
+          # TODO: añadir staging y production cuando estén listos
+
+jobs:
+  build:
+    name: Build and Push Docker Image. Entorno-${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.environment }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build and Push Docker image
+        run: |
+          echo "Build Output:"
+          docker buildx build \
+            --progress=plain \
+            --build-arg USE_PYPI=1 \
+            -t ${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}:${{ inputs.environment }} \
+            --push \
+            .
+
+      - name: Verify tags
+        run: |
+          echo "Imagen construida y etiquetada como:"
+          echo "${{ secrets.DOCKER_HUB_USERNAME }}/${{ github.event.repository.name }}:${{ inputs.environment }}"
+
+  cd:
+    name: Deploy to Rancher
+    needs: build
+    if: ${{ inputs.environment != 'production' }}
+    runs-on: self-hosted
+    steps:
+      - name: Setear variables según entorno
+        id: vars
+        run: |
+          ENV="${{ inputs.environment }}"
+          if [[ "$ENV" == "staging" ]]; then
+            echo "RANCHER_CLUSTER=${{ secrets.PROD_CLUSTER_ID }}" >> $GITHUB_OUTPUT
+            echo "RANCHER_NAMESPACE=tecopos"  >> $GITHUB_OUTPUT
+          else
+            # development
+            echo "RANCHER_CLUSTER=${{ secrets.DEV_CLUSTER_ID }}" >> $GITHUB_OUTPUT
+            echo "RANCHER_NAMESPACE=tecoposv3"  >> $GITHUB_OUTPUT
+          fi
+
+      - name: Redeploy via Rancher API
+        run: |
+          # TODO: confirmar el nombre exacto del deployment del processor en Rancher
+          DEPLOYMENT_NAME="log-processor"
+
+          NS="${{ steps.vars.outputs.RANCHER_NAMESPACE }}"
+          PROJECT_ID=$(curl -k -s -X GET \
+            -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
+            "https://${{ secrets.DEPLOY_URL }}/cluster/${{ steps.vars.outputs.RANCHER_CLUSTER }}/namespaces" \
+            | jq -r --arg ns "$NS" '.data[] | select(.name==$ns) | .projectId')
+
+          echo "Project ID: $PROJECT_ID"
+          echo "Deployment: $DEPLOYMENT_NAME"
+          echo "Namespace: $NS"
+
+          curl -k -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "https://${{ secrets.DEPLOY_URL }}/project/${PROJECT_ID}/workloads/deployment:${{ steps.vars.outputs.RANCHER_NAMESPACE }}:${DEPLOYMENT_NAME}?action=redeploy"
