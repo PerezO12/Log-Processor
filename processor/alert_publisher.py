@@ -24,6 +24,7 @@ log = structlog.get_logger(__name__)
 class AlertPublisher:
     def __init__(self, settings: Settings, dry_run: bool = False):
         cfg = settings.alertmanager
+        self._enabled = cfg.enabled
         self._url = cfg.url.rstrip("/")
         self._path = cfg.webhook_path
         self._timeout = cfg.timeout_seconds
@@ -31,7 +32,7 @@ class AlertPublisher:
 
     def publish(self, anomalies: List[ClusteredAnomaly]) -> List[dict]:
         """Publica anomalias y devuelve los payloads construidos."""
-        if not anomalies:
+        if not self._enabled or not anomalies:
             return []
         payload = [self._build_alert(c) for c in anomalies]
 

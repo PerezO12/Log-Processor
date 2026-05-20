@@ -34,13 +34,15 @@ from pydantic_settings import (
 # Sub-modelos
 # ----------------------------------------------------------------------------
 class LokiConfig(BaseModel):
-    url: str = "http://localhost:13100"
+    url: str = ""                   # requerido — falla en arranque si no se define via PROCESSOR_LOKI__URL
     query_step: str = "60s"
-    max_lines: int = 10000
+    max_lines: int = 5000
     timeout_seconds: int = 30
+    stream_label: str = "service_name"
 
 
 class AlertManagerConfig(BaseModel):
+    enabled: bool = False           # deshabilitado por defecto; activar con PROCESSOR_ALERTMANAGER__ENABLED=true
     url: str = "http://alertmanager:9093"
     webhook_path: str = "/api/v2/alerts"
     timeout_seconds: int = 10
@@ -213,6 +215,28 @@ class Settings(BaseSettings):
     history: HistoryConfig = Field(default_factory=HistoryConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @model_validator(mode="after")
+    def _check_required_config(self) -> "Settings":
+        """Falla rapido si faltan valores obligatorios que no tienen default sensato."""
+        if not self.loki.url:
+            raise ValueError(
+                "\n\nPROCESSOR_LOKI__URL is required — Loki endpoint is not configured.\n"
+                "Add it to your .env file or set it as an environment variable:\n"
+                "  Local dev:  PROCESSOR_LOKI__URL=http://localhost:13100\n"
+                "  k3s:        PROCESSOR_LOKI__URL=http://loki.tecopos-observability.svc.cluster.local:3100\n"
+            )
+        if self.alertmanager.enabled and not self.alertmanager.url:
+            raise ValueError(
+                "\n\nPROCESSOR_ALERTMANAGER__URL is required when AlertManager is enabled.\n"
+                "Set PROCESSOR_ALERTMANAGER__URL=http://<host>:9093 in .env\n"
+            )
+        if self.telegram.enabled and (not self.telegram.bot_token or not self.telegram.chat_id):
+            raise ValueError(
+                "\n\nPROCESSOR_TELEGRAM__BOT_TOKEN and PROCESSOR_TELEGRAM__CHAT_ID are required "
+                "when Telegram is enabled.\n"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_service_profiles_exist(self) -> "Settings":

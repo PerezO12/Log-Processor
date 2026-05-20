@@ -1,0 +1,26 @@
+services:
+  processor:
+    build:
+      context: .
+      args:
+        # USE_PYPI=1 permite que pip descargue de internet durante el build.
+        USE_PYPI: "0"
+    image: tecopos-processor:local
+    environment:
+      PROCESSOR_ENV: local
+      # Loki accesible desde el contenedor.
+      PROCESSOR_LOKI__URL: http://172.16.0.3:30100
+      PROCESSOR_LOKI__STREAM_LABEL: service_name
+      PROCESSOR_TELEGRAM__ENABLED: "true"
+      PROCESSOR_TELEGRAM__BOT_TOKEN: ${PROCESSOR_TELEGRAM__BOT_TOKEN}
+      PROCESSOR_TELEGRAM__CHAT_ID: ${PROCESSOR_TELEGRAM__CHAT_ID}
+      PROCESSOR_TELEGRAM__MIN_SEVERITY: warning
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persistencia del estado de Drain3 entre reinicios del contenedor.
+      - drain_state:/data/drain_state
+    restart: unless-stopped
+
+volumes:
+  drain_state:

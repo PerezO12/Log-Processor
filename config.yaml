@@ -23,11 +23,13 @@
 # Fuente de datos
 # ----------------------------------------------------------------------------
 loki:
-  url: "http://localhost:13100"   # default; sobreescribir con PROCESSOR_LOKI__URL en .env
+  # url es OBLIGATORIO — definir en .env o como variable de entorno:
+  #   Local:  PROCESSOR_LOKI__URL=http://172.16.0.3:30100  (NodePort expuesto en el cluster)
+  #   k3s:    PROCESSOR_LOKI__URL=http://loki.tecopos-observability.svc.cluster.local:3100
   query_step: "60s"
   max_lines: 5000
   timeout_seconds: 30
-
+  stream_label: "service_name"
 # ----------------------------------------------------------------------------
 # Destino de alertas (AlertManager)
 # ----------------------------------------------------------------------------
@@ -46,41 +48,7 @@ telegram:
   timeout_seconds: 10
   min_severity: "warning"         # "warning" = todas; "critical" = solo |z|>=5
 
-# ============================================================================
-# SERVICIOS MONITOREADOS
-# ============================================================================
-#
-# AGREGAR UN SERVICIO NUEVO (sin tocar codigo):
-#   1. Verificar que el nombre coincide exactamente con el label `service`
-#      en Loki. Puedes consultarlo en:
-#        http://<loki>:3100/loki/api/v1/label/service/values
-#   2. Elegir el perfil de log segun el formato:
-#        nestjs       → formato [Nest] PID - TIMESTAMP LEVEL [Context] mensaje
-#        kafkajs_json → JSON con campos level/message/logger/groupId
-#        winston_json → JSON con campos level/message/timestamp/label
-#        fallback     → cualquier texto plano (nivel=unknown, poca precision)
-#   3. Anadir la entrada en processor.services con los overrides necesarios.
-#      No hay limite de servicios. No se necesita reiniciar el procesador
-#      hasta el proximo ciclo — solo recargar config.
-#
-# AGREGAR UN FORMATO NUEVO (requiere codigo, solo si no encaja en los 3 anteriores):
-#   1. Crear processor/profiles/mi_formato.py con clase @register
-#   2. Importar en processor/profiles/__init__.py
-#   3. Declarar el perfil en la seccion `profiles:` de este archivo
-#   4. Usarlo en services igual que los existentes
-#
-# Servicios disponibles en el Loki de produccion (label service):
-#   Backends activos:  tecoposv1, tecoposv1-sso, tecoposv2, gateway, gatewaybeta,
-#                      midas-dev, control-server, controlbeta, apollo, hermes,
-#                      identitydev, identitybeta, reservas-server
-#   Infraestructura:   elasticsearch, minio, redis, redis-control, redis-identity,
-#                      redisbeta-control, redisbeta-identity
-#   Frontends/web:     controlweb, controlwebstaging, identity-web, identitybeta-web,
-#                      portal-sever, reservas-web, tecopos-admin, tecopos-portal-web,
-#                      tecopos-tiendav2, tecopos-tiendav2pro, tecopos-admin-ganma,
-#                      tecopos-alma, tarjetas-regalo, celebren-web, elgelato-landing,
-#                      imperial-landing
-# ============================================================================
+
 processor:
   services:
 
@@ -180,7 +148,7 @@ profiles:
     extra_fields:  [label]
 
 # ----------------------------------------------------------------------------
-# Algoritmo Drain (Cap. II II.3.3, etapa 1)
+# Algoritmo Drain
 # ----------------------------------------------------------------------------
 drain:
   depth: 4

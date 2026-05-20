@@ -38,6 +38,7 @@ class LokiClient:
         cfg = settings.loki
         self._cfg = cfg
         self.base_url = cfg.url.rstrip("/")
+        self._stream_label = cfg.stream_label
         self._client = httpx.Client(timeout=cfg.timeout_seconds)
 
     # ------------------------------------------------------------------
@@ -117,7 +118,7 @@ class LokiClient:
         """Trae logs del servicio para los ultimos `window_minutes`."""
         end = datetime.now(tz=timezone.utc)
         start = end - timedelta(minutes=window_minutes)
-        return self.query_range(f'{{service="{service}"}}', start, end)
+        return self.query_range(f'{{{self._stream_label}="{service}"}}', start, end)
 
     def fetch_history(
         self, service: str, history_days: int, window_minutes: int
@@ -125,4 +126,4 @@ class LokiClient:
         """Trae logs historicos del servicio para `history_days` dias."""
         end = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
         start = end - timedelta(days=history_days)
-        return self.query_range(f'{{service="{service}"}}', start, end)
+        return self.query_range(f'{{{self._stream_label}="{service}"}}', start, end)
