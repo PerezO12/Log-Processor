@@ -155,7 +155,7 @@ drain:
   similarity_threshold: 0.4
   max_children: 100
   extra_delimiters: []
-  state_save_path: "./drain_state"
+  state_save_path: "/data/drain_state"
   state_save_interval: 5
 
 # ----------------------------------------------------------------------------
@@ -171,7 +171,7 @@ dbscan:
 # ----------------------------------------------------------------------------
 history:
   backend: sqlite
-  path: "./drain_state/history.db"
+  path: "/data/drain_state/history.db"
   flush_every_cycles: 1
   schema_version: 1
 

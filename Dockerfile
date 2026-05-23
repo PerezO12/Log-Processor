@@ -27,6 +27,8 @@ WORKDIR /app
 # Usuario sin privilegios para ejecutar el proceso.
 RUN useradd --create-home --shell /bin/bash app
 
+RUN mkdir -p /data/drain_state && chown -R app:app /data
+
 COPY wheels/ /tmp/wheels/
 COPY requirements.txt /tmp/requirements.txt
 
