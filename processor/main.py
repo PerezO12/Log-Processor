@@ -22,6 +22,7 @@ Diseno:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import signal
 import sys
@@ -160,6 +161,14 @@ class Processor:
         cycle_id = uuid.uuid4().hex[:8]
         cycle_start = time.monotonic()
         window_end = datetime.now(tz=timezone.utc)
+        # Resumen agregado del ciclo, util para consultas LogQL del Dashboard 3.
+        summary: Dict[str, int] = {
+            "services": 0,
+            "freqs": 0,
+            "anomalies": 0,
+            "clusters": 0,
+            "templates_total": 0,
+        }
 
         with structlog.contextvars.bound_contextvars(cycle_id=cycle_id):
             self.log.info("cycle_start", services=list(self._thresholds.keys()))
@@ -173,6 +182,14 @@ class Processor:
                 self._update_anomaly_metrics(clustered)
                 self._persist_window(window_end, current_freqs)
                 self._prune_history()
+                # Contadores para el evento cycle_summary.
+                summary["services"] = len(self._thresholds)
+                summary["freqs"] = len(current_freqs)
+                summary["anomalies"] = len(anomalies)
+                summary["clusters"] = len({c.cluster_id for c in clustered if c.cluster_id >= 0})
+                summary["templates_total"] = sum(
+                    self._drain.template_count(s) for s in self._thresholds.keys()
+                )
             except Exception as e:
                 ERRORS.labels(module="main", service="").inc()
                 self.log.exception("cycle_error", error=str(e))
@@ -180,6 +197,8 @@ class Processor:
                 elapsed = time.monotonic() - cycle_start
                 CYCLE_DURATION.observe(elapsed)
                 self.log.info("cycle_done", elapsed_sec=round(elapsed, 2))
+                # Resumen consultable desde Loki para el panel 3.1 / 3.4 / 3.6 del Cap. III.
+                self.log.info("cycle_summary", elapsed_sec=round(elapsed, 2), **summary)
 
     # ------------------------------------------------------------------
     # Pasos del ciclo
@@ -257,7 +276,32 @@ class Processor:
 
     def _update_template_metrics(self) -> None:
         for service in self._thresholds.keys():
-            DRAIN_TEMPLATES.labels(service=service).set(self._drain.template_count(service))
+            count = self._drain.template_count(service)
+            DRAIN_TEMPLATES.labels(service=service).set(count)
+            # Evento estructurado consultable desde Loki sin servidor Prometheus.
+            self.log.info("drain_templates_summary", service=service, count=count)
+
+    # ------------------------------------------------------------------
+    # Volcado de plantillas Drain a JSON (verificacion RF-03 y anexo de la tesis)
+    # ------------------------------------------------------------------
+    def dump_templates(self) -> Dict[str, List[dict]]:
+        """Devuelve las plantillas aprendidas por servicio en formato serializable.
+
+        Util para inspeccion manual, anexo de la tesis y verificacion del RF-03
+        sin necesidad de inspeccionar los archivos binarios `.bin` de drain3.
+        """
+        result: Dict[str, List[dict]] = {}
+        for service in self._thresholds.keys():
+            miner = self._drain._miners.get(service) or self._drain._get_miner(service)
+            clusters = []
+            for cid, cluster in sorted(miner.drain.id_to_cluster.items()):
+                clusters.append({
+                    "template_id": cid,
+                    "size": cluster.size,
+                    "template": cluster.get_template(),
+                })
+            result[service] = clusters
+        return result
 
     def _update_anomaly_metrics(self, clustered) -> None:
         for c in clustered:
@@ -276,6 +320,16 @@ def _parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Corre un ciclo, imprime las alertas que enviaria, y sale.",
+    )
+    p.add_argument(
+        "--once",
+        action="store_true",
+        help="Ejecuta un solo ciclo (con notificaciones reales) y sale. Util para tests E2E.",
+    )
+    p.add_argument(
+        "--dump-templates",
+        action="store_true",
+        help="Vuelca las plantillas Drain aprendidas a stdout en formato JSON y sale.",
     )
     p.add_argument(
         "--config",
@@ -298,7 +352,17 @@ def main() -> None:
         defaults_k=settings.processor.defaults.threshold_k,
         services=[s.name for s in settings.enabled_services()],
         dry_run=args.dry_run,
+        once=args.once,
     )
+
+    # Modo --dump-templates: no necesita Loki ni metrics server.
+    if args.dump_templates:
+        proc = Processor(settings, dry_run=True)
+        templates = proc.dump_templates()
+        json.dump(templates, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        proc.shutdown()
+        return
 
     # Healthcheck Loki antes de arrancar el scheduler.
     with LokiClient(settings) as c:
@@ -307,13 +371,14 @@ def main() -> None:
             sys.exit(1)
     log.info("loki_ready", url=settings.loki.url)
 
-    # Metrics server
-    start_metrics_server(settings.metrics)
-    log.info("metrics_listening", port=settings.metrics.port)
+    # Metrics server (no en --dry-run ni en --once para evitar puertos colgados).
+    if not (args.dry_run or args.once):
+        start_metrics_server(settings.metrics)
+        log.info("metrics_listening", port=settings.metrics.port)
 
     proc = Processor(settings, dry_run=args.dry_run)
 
-    if args.dry_run:
+    if args.dry_run or args.once:
         proc.run_cycle()
         proc.shutdown()
         return
