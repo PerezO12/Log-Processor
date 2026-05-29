@@ -72,10 +72,9 @@ def configure_logging(settings: Settings) -> None:
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
     ]
-    if settings.logging.format == "json":
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        processors.append(structlog.dev.ConsoleRenderer())
+    # TODO: Permitir nuevamente console format cuando Loki soporte parsing automático de texto plano.
+    # Por ahora forzar JSON para que las queries LogQL con `| json` funcionen en Grafana.
+    processors.append(structlog.processors.JSONRenderer())
 
     structlog.configure(
         processors=processors,
