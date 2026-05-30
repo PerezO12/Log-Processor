@@ -319,15 +319,30 @@ _ENV_PROFILES: Dict[str, Dict[str, Any]] = {
         "logging": {"level": "DEBUG", "format": "console"},
     },
     "development": {
-        # Balance: detecta en 5 ciclos, algo de ruido tolerable
+        # ====================================================================
+        # ⚠️ TODO TESIS — REVERTIR ANTES DE SUBIR A PRODUCCIÓN ⚠️
+        # --------------------------------------------------------------------
+        # Parámetros hardcodeados temporalmente para la fase de validación de
+        # la tesis. Permiten detectar anomalías rápido en desarrollo, donde
+        # el tráfico es bajo y los filtros conservadores originales
+        # descartaban casi todo. Se evita tocar el .env porque está montado
+        # en Docker y requeriría intervención del área de DevOps.
+        #
+        # Valores ORIGINALES del perfil development (restaurar antes de prod):
+        #   schedule_interval_minutes: 2
+        #   threshold_k:               2.5
+        #   min_observations:          5
+        #   min_count:                 1.5
+        #   min_delta:                 2
+        # ====================================================================
         "processor": {
-            "schedule_interval_minutes": 2,
+            "schedule_interval_minutes": 1,      # TODO TESIS: era 2
             "history_days": 3,
             "defaults": {
-                "threshold_k": 2.5,
-                "min_observations": 5,
-                "min_count": 1.5,
-                "min_delta": 2,
+                "threshold_k": 1.5,              # TODO TESIS: era 2.5 — muy sensible
+                "min_observations": 2,           # TODO TESIS: era 5  — base mínima
+                "min_count": 0.1,                # TODO TESIS: era 1.5 — acepta casi todo
+                "min_delta": 0,                  # TODO TESIS: era 2  — sin filtro de delta
                 "monitor_levels": ["warn", "error"],
             },
         },
