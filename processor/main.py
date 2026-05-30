@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -137,6 +138,21 @@ class Processor:
 
     # ------------------------------------------------------------------
     # Shutdown
+    # ------------------------------------------------------------------
+    def notify_startup(self) -> None:
+        """Envía un mensaje de arranque a Telegram con info del runtime.
+
+        Útil para confirmar que el procesador se levantó correctamente y
+        proporciona evidencia visual de despliegue para la documentación.
+        """
+        try:
+            self._telegram.notify_startup(
+                services=list(self._thresholds.keys()),
+                env=os.environ.get("PROCESSOR_ENV"),
+            )
+        except Exception as e:
+            self.log.warning("startup_notification_failed", error=str(e))
+
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
         self.log.info("processor_shutting_down")
@@ -376,6 +392,9 @@ def main() -> None:
         log.info("metrics_listening", port=settings.metrics.port)
 
     proc = Processor(settings, dry_run=args.dry_run)
+
+    # Notificación de arranque (Telegram) — confirma despliegue al equipo
+    proc.notify_startup()
 
     if args.dry_run or args.once:
         proc.run_cycle()

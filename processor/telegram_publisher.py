@@ -16,8 +16,11 @@ Configuracion minima (env vars):
 from __future__ import annotations
 
 import html
+import os
+import platform
+import socket
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 import httpx
 import structlog
@@ -52,6 +55,105 @@ class TelegramPublisher:
                 "telegram_enabled_but_credentials_missing",
                 hint="Set PROCESSOR_TELEGRAM__BOT_TOKEN and PROCESSOR_TELEGRAM__CHAT_ID",
             )
+
+    # ------------------------------------------------------------------
+    # Notificación de arranque
+    # ------------------------------------------------------------------
+    def notify_startup(self, services: List[str], env: Optional[str] = None) -> None:
+        """Envía un mensaje único a Telegram cuando el procesador arranca.
+
+        Incluye contexto del runtime (hostname, CPU, RAM disponible) útil para
+        operadores que reciben la alerta y para la tesis (evidencia de
+        despliegue real sobre la infraestructura).
+        """
+        if not self._enabled:
+            return
+
+        text = self._format_startup(services, env)
+        if self._dry_run:
+            log.info("telegram_dry_run_startup", chars=len(text), preview=text[:200])
+            return
+
+        try:
+            self._send_raw(text)
+            log.info("telegram_startup_sent", services=len(services))
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el arranque
+            log.warning("telegram_startup_failed", error=str(e))
+
+    @staticmethod
+    def _read_system_info() -> dict:
+        """Obtiene CPU/RAM del host usando solo módulos estándar.
+
+        En contenedores Linux lee `/proc/meminfo` y `os.cpu_count()`.
+        En entornos donde `/proc` no existe (Windows nativo), retorna
+        solo los datos disponibles.
+        """
+        info: dict = {
+            "hostname": socket.gethostname(),
+            "system": f"{platform.system()} {platform.release()}",
+            "cpus": os.cpu_count() or "?",
+            "python": platform.python_version(),
+        }
+        # RAM total (solo Linux/contenedores)
+        try:
+            with open("/proc/meminfo", encoding="ascii") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        kb = int(line.split()[1])
+                        info["ram_gb"] = round(kb / (1024 * 1024), 2)
+                    elif line.startswith("MemAvailable:"):
+                        kb = int(line.split()[1])
+                        info["ram_free_gb"] = round(kb / (1024 * 1024), 2)
+        except (FileNotFoundError, OSError):
+            pass
+        return info
+
+    def _format_startup(self, services: List[str], env: Optional[str]) -> str:
+        sysinfo = self._read_system_info()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        env_label = f" · <code>{html.escape(env)}</code>" if env else ""
+
+        lines: List[str] = [
+            f"🟢 <b>Procesador TECOPOS iniciado</b>{env_label}",
+            f"   🕒 {now}",
+            "",
+            "<b>📦 Runtime</b>",
+            f"   🖥 host: <code>{html.escape(str(sysinfo['hostname']))}</code>",
+            f"   🐧 sistema: <code>{html.escape(str(sysinfo['system']))}</code>",
+            f"   🧠 CPUs: <code>{sysinfo['cpus']}</code>",
+        ]
+        if "ram_gb" in sysinfo:
+            ram_line = f"   💾 RAM: <code>{sysinfo['ram_gb']} GB"
+            if "ram_free_gb" in sysinfo:
+                ram_line += f" ({sysinfo['ram_free_gb']} GB libres)"
+            ram_line += "</code>"
+            lines.append(ram_line)
+        lines.append(f"   🐍 Python: <code>{sysinfo['python']}</code>")
+        lines.append("")
+        lines.append(f"<b>🛠 Servicios monitorizados ({len(services)})</b>")
+        # Mostrar todos los servicios (cortando si fuesen demasiados)
+        shown = services[:20]
+        services_block = ", ".join(f"<code>{html.escape(s)}</code>" for s in shown)
+        if len(services) > 20:
+            services_block += f" …y {len(services) - 20} más"
+        lines.append(f"   {services_block}")
+        lines.append("")
+        lines.append("<i>El procesador comenzará a notificar anomalías en los próximos ciclos.</i>")
+        return "\n".join(lines)
+
+    def _send_raw(self, text: str) -> None:
+        """Envío directo sin filtros (usado por notify_startup)."""
+        url = TELEGRAM_API.format(token=self._token)
+        payload = {
+            "chat_id": self._chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        with httpx.Client(timeout=self._timeout) as client:
+            r = client.post(url, json=payload)
+            if r.status_code >= 400:
+                raise RuntimeError(f"telegram_rejected status={r.status_code} body={r.text[:200]}")
 
     # ------------------------------------------------------------------
     # API
