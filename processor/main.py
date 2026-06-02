@@ -271,7 +271,25 @@ class Processor:
         all_history: List[List[TemplateFrequency]] = []
         for service in self._thresholds.keys():
             all_history.extend(self._history.load_history(service, H_days))
-        return detect_anomalies(current, all_history, self._resolve)
+        anomalies = detect_anomalies(current, all_history, self._resolve)
+
+        # Emitir un evento estructurado por cada anomalía detectada, de manera
+        # que queden consultables en Loki vía LogQL independientemente de los
+        # publishers configurados (AlertManager / Telegram). Útil para auditoría
+        # y para los dashboards de seguimiento (RF-07).
+        for a in anomalies:
+            self.log.warning(
+                "anomaly_detected",
+                service=a.service,
+                template_id=a.template_id,
+                template=a.template_str,
+                current=a.current,
+                mean=round(a.mean, 2),
+                stddev=round(a.stddev, 2),
+                z_score=round(a.z_score, 2),
+                direction=a.direction,
+            )
+        return anomalies
 
     def _persist_window(self, ts: datetime, freqs: List[TemplateFrequency]) -> None:
         try:
