@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tecopos-observability
+  labels:
+    name: tecopos-observability
+    purpose: log-aggregation-anomaly-detection

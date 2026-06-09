@@ -1,0 +1,26 @@
+# =============================================================================
+# PVC del procesador — guarda el estado de Drain entre reinicios
+#
+# El estado de Drain (arbol de templates aprendidos) se persiste en
+# /data/drain_state. Sin esto, cada reinicio reaprende todo desde cero y
+# pierde el historico para calcular umbrales (mu y sigma).
+#
+# StorageClass: local-path (default de k3s en sandbox Y en TECOPOS).
+# Cero cambios al migrar.
+#
+# En produccion multi-nodo, considerar cambiar a longhorn para que el estado
+# de Drain sobreviva si el pod se reagenda en otro nodo. En single-node no
+# hace falta — local-path es suficiente.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: processor-data
+  namespace: tecopos-observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,26 @@
+# =============================================================================
+# PVC de Loki — almacenamiento persistente para los logs
+#
+# StorageClass elegido: local-path
+#   - Es la default de k3s tanto en el sandbox como en el cluster de TECOPOS
+#   - Cero cambios entre sandbox y produccion al migrar
+#
+# En produccion multi-nodo, DevOps puede decidir cambiar a "longhorn" para
+# tener replicacion entre nodos (mas resiliente pero requiere mas recursos).
+# El sandbox es single-node, por eso local-path es suficiente y mas simple.
+#
+# Tamano: 10Gi es suficiente para sandbox demo. En produccion TECOPOS con
+# trafico real, considerar 100Gi+ segun la politica de retencion de logs.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: tecopos-observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

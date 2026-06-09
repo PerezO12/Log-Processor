@@ -1,0 +1,194 @@
+# =============================================================================
+# Alloy ConfigMap — Sandbox (k3s single-node)
+# Este ConfigMap esta adaptado al sandbox. Cuando se migre a produccion, se usa "alloy-patch-devops.alloy"
+# todo: cambiar solo el namespace observado y la URL de Loki antes de llevar a produccion.
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alloy
+  namespace: tecopos-observability
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: alloy
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "nodes/metrics", "services", "endpoints", "pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: alloy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: alloy
+subjects:
+  - kind: ServiceAccount
+    name: alloy
+    namespace: tecopos-observability
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alloy-config
+  namespace: tecopos-observability
+data:
+  config.alloy: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    // -------------------------------------------------------------------------
+    // DISCOVERY: pods del namespace tecopos-observability
+    //
+    // En el sandbox observamos nuestro propio namespace donde corren los
+    // log-replay pods. En produccion TECOPOS este valor cambia a "tecoposv3"
+    // -------------------------------------------------------------------------
+    discovery.kubernetes "pods" {
+      role = "pod"
+      namespaces {
+        names = ["tecopos-observability"]
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // RELABEL: extraer 'app' del pod y duplicarlo como 'service'
+    //
+    // El label 'app' es el que ponen en sus pods (igual que TECOPOS).
+    // Copia adicional a 'service' para que loki.process pueda seleccionar
+    // sin romper queries existentes basadas en {app="..."}.
+    // -------------------------------------------------------------------------
+    discovery.relabel "pods" {
+      targets = discovery.kubernetes.pods.targets
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        target_label  = "app"
+      }
+
+      rule {
+        source_labels = ["__meta_kubernetes_pod_label_app"]
+        target_label  = "service"
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // SOURCE: leer logs de los pods via Kubernetes API
+    // -------------------------------------------------------------------------
+    loki.source.kubernetes "pods" {
+      targets    = discovery.relabel.pods.output
+      forward_to = [loki.process.extract_level.receiver]
+    }
+
+    // -------------------------------------------------------------------------
+    // PROCESS: extraer level por perfil de servicio
+    //
+    // Perfil C   - Winston JSON     : tecoposv1
+    // Perfil JSON- kafkajs          : control, controlbeta
+    // Perfil A   - NestJS built-in  : gateway, tecoposv2, midas-dev
+    //
+    // Cualquier otro servicio pasa sin modificacion.
+    //
+    // PATRON DE SEGURIDAD por perfil:
+    //   1. Extraccion en variable temporal (log_level / nestlevel)
+    //   2. Normalizacion con guarda condicional
+    //   3. Promocion a label
+    //   4. Safety net: si quedo vacio, eliminar el label
+    // -------------------------------------------------------------------------
+    loki.process "extract_level" {
+
+      // --- Perfil C — Winston JSON (tecoposv1) ---
+      stage.match {
+        selector = "{service=\"tecoposv1\"}"
+
+        stage.json {
+          expressions = { log_level = "level" }
+        }
+        stage.template {
+          source   = "log_level"
+          template = "{{ if .Value }}{{ ToLower .Value }}{{ end }}"
+        }
+        stage.labels {
+          values = { level = "log_level" }
+        }
+
+        stage.match {
+          selector = "{level=\"\"}"
+          stage.label_drop {
+            values = ["level"]
+          }
+        }
+      }
+
+      // --- Perfil JSON — kafkajs (control, controlbeta) ---
+      stage.match {
+        selector = "{service=~\"control|controlbeta\"}"
+
+        stage.json {
+          expressions = { log_level = "level" }
+        }
+        stage.template {
+          source   = "log_level"
+          template = "{{ if .Value }}{{ ToLower .Value }}{{ end }}"
+        }
+        stage.labels {
+          values = { level = "log_level" }
+        }
+
+        stage.match {
+          selector = "{level=\"\"}"
+          stage.label_drop {
+            values = ["level"]
+          }
+        }
+      }
+
+      // --- Perfil A — NestJS built-in (gateway, tecoposv2, midas-dev) ---
+      stage.match {
+        selector = "{service=~\"gateway|tecoposv2|midas-dev\"}"
+
+        stage.regex {
+          expression = "^\\[Nest\\]\\s+\\d+.*?\\s+(?P<nestlevel>LOG|WARN|ERROR|DEBUG|VERBOSE)\\s+\\["
+        }
+        stage.template {
+          source   = "nestlevel"
+          template = "{{ if eq .Value \"LOG\" }}info{{ else if eq .Value \"WARN\" }}warn{{ else if eq .Value \"ERROR\" }}error{{ else if eq .Value \"DEBUG\" }}debug{{ else if eq .Value \"VERBOSE\" }}debug{{ end }}"
+        }
+        stage.labels {
+          values = { level = "nestlevel" }
+        }
+
+        stage.match {
+          selector = "{level=\"\"}"
+          stage.label_drop {
+            values = ["level"]
+          }
+        }
+      }
+
+      forward_to = [loki.write.local.receiver]
+    }
+
+    // -------------------------------------------------------------------------
+    // WRITE: enviar a Loki interno del cluster
+    // En produccion TECOPOS este URL cambia a la IP interna del Loki de
+    // produccion (definir con el equipo de DevOps).
+    // -------------------------------------------------------------------------
+    loki.write "local" {
+      endpoint {
+        url = "http://loki.tecopos-observability.svc.cluster.local:3100/loki/api/v1/push"
+      }
+      external_labels = {
+        cluster = "tecopos-sandbox",
+      }
+    }

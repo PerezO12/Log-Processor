@@ -1,0 +1,28 @@
+# =============================================================================
+# Service del procesador — expone /metrics para Prometheus
+#
+# Tipo ClusterIP (solo accesible dentro del cluster).
+#
+# Si en el futuro se quiere scrapear con Prometheus, se anaden las anotaciones
+# de service discovery (prometheus.io/scrape: "true", etc.).
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: processor
+  namespace: tecopos-observability
+  labels:
+    app: processor
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app: processor
+  ports:
+    - name: metrics
+      port: 8000
+      targetPort: 8000
+      protocol: TCP

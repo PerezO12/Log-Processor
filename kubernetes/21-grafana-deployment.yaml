@@ -1,0 +1,117 @@
+# =============================================================================
+# PVC de Grafana — guarda dashboards, usuarios, settings, anotaciones
+#
+# StorageClass: local-path (default de k3s en sandbox Y en TECOPOS).
+# En produccion DevOps puede cambiar a longhorn para replicacion entre nodos.
+#
+# Tamano: 5Gi es suficiente — Grafana solo guarda metadatos, no logs.
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: tecopos-observability
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: tecopos-observability
+  labels:
+    app: grafana
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472
+        runAsUser: 472
+        runAsGroup: 472
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # todo:
+            # Las credenciales admin DEBEN venir de un Secret creado fuera de este YAML.
+            # Definir con el equipo de DevOps.
+            - name: GF_SECURITY_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: admin-user
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: grafana-admin
+                  key: admin-password
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_FEATURE_TOGGLES_ENABLE
+              value: "accessControlOnCall"
+            # Para que detras de Ingress no se rompan los redirects.
+            - name: GF_SERVER_ROOT_URL
+              value: "https://grafana.tecopos.test"
+            - name: GF_SERVER_DOMAIN
+              value: "grafana.tecopos.test"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: storage
+              mountPath: /var/lib/grafana
+            - name: provisioning-datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: provisioning-dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: grafana-data
+        - name: provisioning-datasources
+          configMap:
+            name: grafana-provisioning
+            items:
+              - key: loki-datasource.yaml
+                path: loki.yaml
+        - name: provisioning-dashboards
+          configMap:
+            name: grafana-provisioning
+            items:
+              - key: dashboards.yaml
+                path: dashboards.yaml

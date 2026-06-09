@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: processor
+  namespace: tecopos-observability
+  labels:
+    app: processor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # PVC ReadWriteOnce — no permite 2 pods simultáneos
+  selector:
+    matchLabels:
+      app: processor
+  template:
+    metadata:
+      labels:
+        app: processor
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: processor
+          # TODO: reemplazar <DOCKER_HUB_USER> con el usuario de Docker Hub del proyecto
+          image: <DOCKER_HUB_USER>/tecopos-processor:production
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: PROCESSOR_ENV
+              value: "production"
+            - name: PROCESSOR_LOKI__URL
+              value: "http://loki.tecopos-observability.svc.cluster.local:3100"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # Credenciales de Telegram — vienen del Secret (no en texto plano)
+            - name: PROCESSOR_TELEGRAM__ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: processor-secrets
+                  key: telegram_enabled
+            - name: PROCESSOR_TELEGRAM__BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: processor-secrets
+                  key: telegram_bot_token
+            - name: PROCESSOR_TELEGRAM__CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: processor-secrets
+                  key: telegram_chat_id
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: processor-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: processor-data

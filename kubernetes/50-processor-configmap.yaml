@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: processor-config
+  namespace: tecopos-observability
+data:
+  config.yaml: |
+    loki:
+      url: "http://loki.tecopos-observability.svc.cluster.local:3100"
+      query_step: "60s"
+      max_lines: 5000
+      timeout_seconds: 30
+      stream_label: "service"   # cambiar a "app" si el Alloy patch no está desplegado
+
+    alertmanager:
+      url: "http://alertmanager:9093"
+      webhook_path: "/api/v2/alerts"
+      timeout_seconds: 10
+
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
+      timeout_seconds: 10
+      min_severity: "warning"
+
+    processor:
+      services:
+        - name: tecoposv1
+          profile: winston_json
+          overrides:
+            monitor_levels: [info, warn, error]
+
+        - name: tecoposv2
+          profile: nestjs
+
+        - name: gateway
+          profile: nestjs
+          overrides:
+            threshold_k: 3.5
+            monitor_levels: [info, warn, error]
+
+        - name: gatewaybeta
+          profile: nestjs
+          overrides:
+            threshold_k: 3.5
+
+        - name: midas-dev
+          profile: nestjs
+          overrides:
+            threshold_k: 4.0
+
+        - name: control-server
+          profile: kafkajs_json
+
+        - name: controlbeta
+          profile: kafkajs_json
+
+        - name: apollo
+          profile: nestjs
+
+        - name: hermes
+          profile: nestjs
+
+        - name: identitydev
+          profile: nestjs
+
+        - name: identitybeta
+          profile: nestjs
+
+    profiles:
+      nestjs:
+        type: regex
+        pattern: '^\[Nest\]\s+\d+.*?\s+(?P<level>LOG|WARN|ERROR|DEBUG|VERBOSE)\s+\[(?P<context>[^\]]+)\]\s+(?P<message>.+)$'
+        level_map:
+          LOG:     info
+          WARN:    warn
+          ERROR:   error
+          DEBUG:   debug
+          VERBOSE: debug
+
+      kafkajs_json:
+        type: json
+        level_field:   level
+        message_field: message
+        extra_fields:  [logger, groupId, broker]
+
+      winston_json:
+        type: json
+        level_field:   level
+        message_field: message
+        extra_fields:  [label]
+
+    drain:
+      depth: 4
+      similarity_threshold: 0.4
+      max_children: 100
+      extra_delimiters: []
+      state_save_path: "/data/drain_state"
+      state_save_interval: 5
+
+    dbscan:
+      eps: 0.5
+      min_samples: 2
+      metric: "euclidean"
+
+    history:
+      backend: sqlite
+      path: "/data/drain_state/history.db"
+      flush_every_cycles: 1
+      schema_version: 1
+
+    metrics:
+      enabled: true
+      port: 8000
+      host: "0.0.0.0"

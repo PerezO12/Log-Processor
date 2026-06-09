@@ -1,0 +1,217 @@
+# =============================================================================
+# Log-replay pods — simulan los servicios reales de TECOPOS
+#
+# 5 pods que emiten continuamente logs con los formatos REALES de cada servicio,
+#
+# Etiquetas (app=...) coinciden EXACTAMENTE con los nombres reales del cluster
+# de TECOPOS para que el procesador no distinga sandbox de produccion.
+#
+# ─── Pod 1: tecoposv1 (Perfil C - Winston JSON) ──────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-replay-tecoposv1
+  namespace: tecopos-observability
+  labels:
+    app: tecoposv1
+    role: log-replay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: emitter
+      image: docker.io/library/bash:5
+      command:
+        - bash
+        - -c
+        - |
+          while true; do
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"label\":\"paymentGatewayProcesator\",\"level\":\"info\",\"message\":\"Processing Tropipay payment: orderId=${RANDOM},status=SUCCESS\",\"timestamp\":\"${TS}\"}";
+            sleep 2;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"label\":\"kafkaController\",\"level\":\"info\",\"message\":\"Kafka message received on topic: payments.events.region-1, offset: ${RANDOM}\",\"timestamp\":\"${TS}\"}";
+            sleep 3;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"label\":\"webhookHandler\",\"level\":\"warn\",\"message\":\"Slow webhook response: providerId=PRUEBA_PROVIDER_ID, latency_ms=${RANDOM}\",\"timestamp\":\"${TS}\"}";
+            sleep 2;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"label\":\"paymentGatewayProcesator\",\"level\":\"error\",\"message\":\"Payment validation failed: orderId=${RANDOM}, reason=signature_mismatch\",\"timestamp\":\"${TS}\"}";
+            sleep 5;
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+---
+# ─── Pod 2: gateway (Perfil A - NestJS built-in) ─────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-replay-gateway
+  namespace: tecopos-observability
+  labels:
+    app: gateway
+    role: log-replay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: emitter
+      image: docker.io/library/bash:5
+      command:
+        - bash
+        - -c
+        - |
+          while true; do
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 46  - ${TS}     LOG [GraphQLModule] Resolved query: getBusinesses";
+            sleep 2;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 46  - ${TS}     LOG [GrpcClient] Connected to identity:50051";
+            sleep 1;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 46  - ${TS}    WARN [GrpcClient] High latency to control:50052 (${RANDOM}ms)";
+            sleep 3;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 46  - ${TS}   ERROR [GrpcErrorHandler] gRPC error: 2 UNKNOWN: Business with DNI PRUEBA001 not found";
+            sleep 4;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 46  - ${TS}     LOG [GraphQLModule] Mutation: createOrder +45ms";
+            sleep 2;
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+---
+# ─── Pod 3: tecoposv2 (Perfil A - NestJS built-in) ───────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-replay-tecoposv2
+  namespace: tecopos-observability
+  labels:
+    app: tecoposv2
+    role: log-replay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: emitter
+      image: docker.io/library/bash:5
+      command:
+        - bash
+        - -c
+        - |
+          while true; do
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 1  - ${TS}     LOG [Bootstrap] Starting tecopos-server 2.0...";
+            sleep 3;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 1  - ${TS}     LOG [OrderHandler] New order created: order-${RANDOM}";
+            sleep 2;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 1  - ${TS}    WARN [InventoryModule] Stock below threshold for SKU-${RANDOM}";
+            sleep 3;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 1  - ${TS}   ERROR [DatabaseService] Connection pool exhausted";
+            sleep 5;
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+---
+# ─── Pod 4: midas-dev (Perfil A - NestJS built-in) ───────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-replay-midas-dev
+  namespace: tecopos-observability
+  labels:
+    app: midas-dev
+    role: log-replay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: emitter
+      image: docker.io/library/bash:5
+      command:
+        - bash
+        - -c
+        - |
+          while true; do
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 117  - ${TS}     LOG [PaymentStatusChangedEventHandler] Handling event: PaymentStatusChangedEvent";
+            sleep 2;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 117  - ${TS}     LOG [WebhookController] handlePaymentCallback executed successfully";
+            sleep 1;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 117  - ${TS}    WARN [PaymentStatusChangedEventHandler] Region mismatch for DNI PRUEBA001: using region from control";
+            sleep 3;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 117  - ${TS}   ERROR [TropipayProvider] Invalid callback payload - signature verification failed";
+            sleep 4;
+            TS=$(date -u +"%m/%d/%Y, %I:%M:%S %p");
+            echo "[Nest] 117  - ${TS}     LOG [SupernovaProvider] Payment link created: ${RANDOM}";
+            sleep 2;
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+
+---
+# ─── Pod 5: control (Perfil JSON - kafkajs) ──────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-replay-control
+  namespace: tecopos-observability
+  labels:
+    app: control
+    role: log-replay
+spec:
+  restartPolicy: Always
+  containers:
+    - name: emitter
+      image: docker.io/library/bash:5
+      command:
+        - bash
+        - -c
+        - |
+          while true; do
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"level\":\"INFO\",\"timestamp\":\"${TS}\",\"logger\":\"kafkajs\",\"message\":\"[ConsumerGroup] Consumer has joined the group\",\"groupId\":\"payment-outcomes-group\",\"memberId\":\"consumer-${RANDOM}\"}";
+            sleep 3;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"level\":\"INFO\",\"timestamp\":\"${TS}\",\"logger\":\"kafkajs\",\"message\":\"[Runner] Processing message: offset ${RANDOM}, partition 0\"}";
+            sleep 2;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"level\":\"WARN\",\"timestamp\":\"${TS}\",\"logger\":\"kafkajs\",\"message\":\"[Runner] The group is rebalancing, re-joining\",\"groupId\":\"payment-outcomes-group\"}";
+            sleep 4;
+            TS=$(date -u +%Y-%m-%dT%H:%M:%S.000Z);
+            echo "{\"level\":\"ERROR\",\"timestamp\":\"${TS}\",\"logger\":\"kafkajs\",\"message\":\"[Connection] Response Heartbeat broker disconnected\",\"broker\":\"kafka-broker:9092\",\"correlationId\":${RANDOM}}";
+            sleep 6;
+          done
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
